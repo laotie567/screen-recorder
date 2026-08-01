@@ -1,4 +1,5 @@
 import AppKit
+import AVFoundation
 import Foundation
 
 /// 命令分发。骨架阶段:未实现的业务命令返回明确错误,后续步骤逐个替换。
@@ -142,6 +143,14 @@ enum CommandHandler {
                 "ok": true,
                 "data": data.base64EncodedString(),
                 "eof": data.count < size,
+            ])
+
+        case "check-permission":
+            // 权限状态查询:验证屏幕录制/麦克风授权是否真的对当前宿主生效(排查用)
+            NativeMessaging.send([
+                "ok": true,
+                "screenRecording": CGPreflightScreenCaptureAccess(),
+                "microphone": AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
             ])
 
         case "test-mixer":

@@ -110,7 +110,13 @@ def main():
     if not (resp and resp.get("ok") is False):
         failures.append(f"read-file negative offset: got {resp}")
 
-    # 9. test-bitrate:码率档位自测(分辨率+帧率组合,防回归)
+    # 9. check-permission:权限状态查询(无权限环境断言明确返回值)
+    send(proc, {"cmd": "check-permission"})
+    resp = recv(proc)
+    if not (resp and resp.get("ok") and "screenRecording" in resp and "microphone" in resp):
+        failures.append(f"check-permission: got {resp}")
+
+    # 10. test-bitrate:码率档位自测(分辨率+帧率组合,防回归)
     send(proc, {"cmd": "test-bitrate"})
     resp = recv(proc)
     if resp and resp.get("ok"):
@@ -155,7 +161,7 @@ def main():
         for f in failures:
             print("  -", f)
         sys.exit(1)
-    print("PASS: protocol smoke test (12 checks)")
+    print("PASS: protocol smoke test (13 checks)")
 
 
 if __name__ == "__main__":

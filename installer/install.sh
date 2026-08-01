@@ -47,8 +47,39 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> 3/4 ad-hoc 签名(录屏/麦克风 TCC 权限按 bundle 记录)..."
-codesign --force --sign - "$APP_DIR"
+echo "==> 3/4 签名(优先固定证书,失败回退 ad-hoc)..."
+# 用自签证书固定签名:ad-hoc 签名每次生成不同 CDHash,
+# macOS 的屏幕录制/麦克风授权按 CDHash 记录,ad-hoc 下每次重装都需重新授权。
+# 自签证书首次生成后存入登录钥匙串,之后复用,签名稳定 → 授权一次永久有效。
+CERT_COMMON_NAME="ScreenRecordHost Signing"
+KEYSTORE="$HOME/Library/Keychains/login.keychain-db"
+SIGN_IDENTITY="" # 空 = 最终回退 ad-hoc
+if security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_COMMON_NAME"; then
+    SIGN_IDENTITY="$CERT_COMMON_NAME"
+else
+    echo "    首次使用:生成自签签名证书..."
+    TMP_CERT_DIR="$(mktemp -d)"
+    if openssl req -x509 -newkey rsa:2048 -keyout "$TMP_CERT_DIR/key.pem" -out "$TMP_CERT_DIR/cert.pem" \
+            -days 3650 -nodes -subj "/CN=$CERT_COMMON_NAME" 2>/dev/null \
+        && { openssl pkcs12 -export -out "$TMP_CERT_DIR/cert.p12" \
+                 -inkey "$TMP_CERT_DIR/key.pem" -in "$TMP_CERT_DIR/cert.pem" -passout pass: -legacy 2>/dev/null \
+             || openssl pkcs12 -export -out "$TMP_CERT_DIR/cert.p12" \
+                 -inkey "$TMP_CERT_DIR/key.pem" -in "$TMP_CERT_DIR/cert.pem" -passout pass: 2>/dev/null; } \
+        && security import "$TMP_CERT_DIR/cert.p12" -k "$KEYSTORE" -P "" -T /usr/bin/codesign >/dev/null 2>&1 \
+        && security find-identity -v -p codesigning 2>/dev/null | grep -q "$CERT_COMMON_NAME"; then
+        SIGN_IDENTITY="$CERT_COMMON_NAME"
+        echo "    证书已生成:$CERT_COMMON_NAME(仅本机,重装不再丢权限)"
+    else
+        echo "    ⚠ 自签证书生成失败(钥匙串/OpenSSL 兼容问题),回退 ad-hoc 签名:"
+        echo "      每次重装需在系统设置重新勾选屏幕录制/麦克风"
+    fi
+    rm -rf "$TMP_CERT_DIR"
+fi
+if [ -n "$SIGN_IDENTITY" ]; then
+    codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR"
+else
+    codesign --force --sign - "$APP_DIR"
+fi
 
 echo "==> 4/4 注册 native messaging host..."
 NM_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
@@ -68,12 +99,18 @@ echo "✔ 安装完成:"
 echo "  - 宿主: $APP_DIR"
 echo "  - host manifest: $NM_DIR/$BUNDLE_ID.json"
 echo
-echo "⚠ 升级/重装提示:ad-hoc 签名每次生成新的 CDHash,"
-echo "  macOS 的屏幕录制/麦克风授权按签名记录,重装后需在"
-echo "  「系统设置 → 隐私与安全性」中重新勾选 ScreenRecordHost。"
+echo "📌 权限授权(重要,顺序不能反):"
+echo "  1. 先完成本次安装(不要中途再重装)"
+echo "  2. 打开 系统设置 → 隐私与安全性 → 屏幕录制 → 若已有 ScreenRecordHost 开关请先关闭再打开;"
+echo "     没有则点「+」→ Cmd+Shift+G → $APP_DIR → 打开 → 勾选"
+echo "  3. 麦克风 同样操作"
+if [ -n "$SIGN_IDENTITY" ]; then
+    echo "  4. 若列表已有旧记录:先删除(选中按减号),再重新添加(证书已固定,只需这一次)"
+else
+    echo "  4. ⚠ 本机未能固定签名证书(已回退 ad-hoc):以后每次重装都需重新勾选权限"
+fi
 echo
-echo "下一步(首次):"
+echo "下一步(扩展):"
 echo "  1. 打开 chrome://extensions,开启「开发者模式」"
 echo "  2. 「加载已解压的扩展程序」,选择: $ROOT/extension"
-echo "  3. 点扩展图标 → 录屏 → 首次会弹系统授权窗,分别允许「屏幕录制」「麦克风」"
-echo "  4. 授权后如提示无法录制,重启宿主(菜单栏图标 → 退出,再点一次录屏自动拉起)"
+echo "  3. 点扩展图标 → 录屏 → 授权后如提示无法录制,重启宿主(菜单栏图标 → 退出,再点一次)"
