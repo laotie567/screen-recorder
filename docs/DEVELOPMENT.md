@@ -127,6 +127,38 @@ cd host && make test
 
 > ⚠️ 扩展私钥 `installer/extension-key.pem` 只存在于构建机,不提交仓库。丢失私钥 = 扩展 ID 变更,需重新 `generate_key.py` 并同步 `extension/manifest.json` 与 `installer/install.sh`。
 
+## Git 工作流(worktree)
+
+仓库采用双分支 + 双 worktree:
+
+| worktree | 分支 | 用途 |
+|---|---|---|
+| `<repo>`(主目录) | `main` | 稳定版,只合入已验收变更 |
+| `<repo>-dev`(同级目录,`git worktree add ../<repo>-dev dev`) | `dev` | 日常开发,验证通过后合入 main |
+
+常用操作:
+
+```bash
+# 查看 worktree
+git worktree list
+
+# 在 dev 中开发(两个目录可并行,各自独立构建/测试/加载扩展)
+cd <repo>-dev && git checkout dev
+# ... 修改、提交 ...
+
+# 合入 main(在 dev 中完成验证后)
+cd <repo> && git checkout main && git merge dev
+
+# 删除不再需要的 dev worktree
+git worktree remove <repo>-dev && git branch -d dev
+```
+
+注意:
+- 每个 worktree 是独立工作副本(含独立 `host/.build`),`make test` 各自运行
+- Chrome 加载的扩展目录指向哪个 worktree,就调试哪份代码(加载前先确认路径)
+- 分支命名:`main`(稳定)/`dev`(开发)/`fix/<描述>`(修复)/`feat/<描述>`(功能)
+- `.reasonix/`、私钥、环境脚本均不入库(.gitignore 已配置)
+
 ## 常见开发坑
 
 1. **TCC 弹窗不会自动出现**:只有真正调用录制 API 才弹窗。`CGPreflightScreenCaptureAccess()` 仅查询;`CGWindowListCreateImage` 在 macOS 15 起 unavailable;用 `AVCaptureScreenInput` 触发。授权后通常需重启进程生效。
