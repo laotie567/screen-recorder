@@ -32,8 +32,9 @@ enum ScreenCaptureService {
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()
-        config.width = Int(display.width)
-        config.height = Int(display.height)
+        // 与录屏一致:用物理像素,避免 Retina 屏截图模糊(逻辑点只有 1/4 面积)
+        config.width = Int(CGDisplayPixelsWide(display.displayID))
+        config.height = Int(CGDisplayPixelsHigh(display.displayID))
 
         let image = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CGImage, Error>) in
             SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, error in

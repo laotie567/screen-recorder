@@ -148,7 +148,7 @@ def main():
         for f in failures:
             print("  -", f)
         sys.exit(1)
-    print("PASS: protocol smoke test (11 checks)")
+    print("PASS: protocol smoke test (12 checks)")
 
 
 if __name__ == "__main__":
