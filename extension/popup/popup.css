@@ -1,0 +1,55 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  width: 320px;
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  font-size: 13px;
+  color: #1f2329;
+  background: #fafafa;
+  padding: 12px;
+}
+
+header { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+h1 { font-size: 15px; flex: 1; }
+
+.dot { width: 10px; height: 10px; border-radius: 50%; }
+.dot.idle { background: #9ca3af; }
+.dot.recording { background: #ef4444; animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: 0.4; } }
+
+#actions { display: flex; gap: 8px; margin-bottom: 10px; }
+button {
+  flex: 1;
+  padding: 9px 0;
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #fff;
+  font-size: 13px;
+  cursor: pointer;
+}
+button:hover { background: #f3f4f6; }
+button:disabled { opacity: 0.5; cursor: not-allowed; }
+button.primary { background: #2563eb; border-color: #2563eb; color: #fff; }
+button.primary:hover { background: #1d4ed8; }
+button.danger { background: #ef4444; border-color: #ef4444; color: #fff; }
+button.danger:hover { background: #dc2626; }
+
+#recording-info { background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px; padding: 10px; margin-bottom: 10px; }
+#recording-info p:first-child { font-weight: 600; color: #b91c1c; }
+.hint { color: #6b7280; font-size: 12px; margin-top: 4px; }
+
+#error-box {
+  background: #fef2f2; border: 1px solid #fecaca; border-radius: 8px;
+  padding: 10px; margin-bottom: 10px; color: #b91c1c; font-size: 12px;
+  white-space: pre-line;
+}
+
+#recordings h2 { font-size: 13px; margin-bottom: 6px; color: #374151; }
+#recording-list { list-style: none; max-height: 220px; overflow-y: auto; }
+#recording-list li {
+  display: flex; align-items: center; gap: 8px;
+  padding: 7px 6px; border-radius: 6px; cursor: pointer;
+}
+#recording-list li:hover { background: #eef2ff; }
+#recording-list .name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#recording-list .meta { color: #9ca3af; font-size: 11px; flex-shrink: 0; }

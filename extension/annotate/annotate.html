@@ -1,0 +1,42 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>截图批注</title>
+  <link rel="stylesheet" href="annotate.css">
+</head>
+<body>
+  <div id="toolbar">
+    <button data-tool="pen" class="tool active" title="画笔">✏️ 画笔</button>
+    <button data-tool="rect" class="tool" title="矩形框选">▭ 矩形</button>
+    <button data-tool="arrow" class="tool" title="箭头">➜ 箭头</button>
+    <button data-tool="text" class="tool" title="文字标注">🅣 文字</button>
+    <button data-tool="blur" class="tool" title="模糊/马赛克">▧ 模糊</button>
+
+    <span class="sep"></span>
+    <label>颜色 <input type="color" id="color" value="#ef4444"></label>
+    <label>粗细 <input type="range" id="size" min="1" max="30" value="4"></label>
+
+    <span class="sep"></span>
+    <button id="undo" title="撤销">↩ 撤销</button>
+    <button id="redo" title="重做">↪ 重做</button>
+    <button id="clear" title="清空">🗑 清空</button>
+
+    <span class="sep"></span>
+    <button id="download" class="primary">下载 PNG</button>
+    <button id="copy">复制到剪贴板</button>
+    <button id="close">关闭</button>
+  </div>
+
+  <div id="canvas-wrap">
+    <canvas id="canvas"></canvas>
+    <div id="text-input-wrap" class="hidden">
+      <textarea id="text-input" placeholder="输入文字,Enter 确认"></textarea>
+    </div>
+    <div id="loading">正在加载截图…</div>
+    <div id="error" class="hidden"></div>
+  </div>
+
+  <script src="annotate.js"></script>
+</body>
+</html>

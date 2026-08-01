@@ -1,0 +1,4 @@
+host/.build/
+.DS_Store
+installer/extension-key.pem
+installer/extension-key.pub.pem

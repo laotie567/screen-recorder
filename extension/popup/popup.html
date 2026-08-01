@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>录屏批注助手</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <header>
+    <h1>录屏批注助手</h1>
+    <span id="status-dot" class="dot idle"></span>
+    <span id="status-text">未连接</span>
+  </header>
+
+  <section id="actions">
+    <button id="btn-record" class="primary">开始录制</button>
+    <button id="btn-screenshot">截图</button>
+  </section>
+
+  <section id="recording-info" class="hidden">
+    <p>正在录制…(最小化浏览器不影响录制)</p>
+    <p class="hint">可通过菜单栏红点停止,或回到这里点「停止录制」</p>
+  </section>
+
+  <section id="error-box" class="hidden"></section>
+
+  <section id="recordings">
+    <h2>最近录制</h2>
+    <ul id="recording-list"></ul>
+    <p id="list-empty" class="hint hidden">暂无录制</p>
+  </section>
+
+  <script src="popup.js"></script>
+</body>
+</html>
