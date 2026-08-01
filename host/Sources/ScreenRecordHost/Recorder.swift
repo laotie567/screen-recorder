@@ -111,21 +111,27 @@ final class Recorder: NSObject {
             throw RecorderError.micPermissionDenied
         }
 
-        // SCShareableContent 在权限异常时可能长时间不返回(SCK 已知怪癖),
-        // 用超时竞速保护,让"卡住"变成明确错误
-        let content = try await withThrowingTaskGroup(of: SCShareableContent.self) { group in
-            group.addTask {
-                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        // SCShareableContent 在权限异常时可能长时间不返回(SCK 已知怪癖)。
+        // 与 startCapture 一致用信号量 + 超时保护(不依赖任务取消,TG 取消不可靠)
+        let contentSem = DispatchSemaphore(value: 0)
+        var contentResult: Result<SCShareableContent, Error>?
+        Task {
+            do {
+                let c = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                contentResult = .success(c)
+            } catch {
+                contentResult = .failure(error)
             }
-            group.addTask {
-                try await Task.sleep(nanoseconds: 15_000_000_000) // 15s
-                throw RecorderError.setupFailed("SCShareableContent timed out (screen recording permission may need restart)")
-            }
-            guard let result = try await group.next() else {
-                throw RecorderError.setupFailed("SCShareableContent failed")
-            }
-            group.cancelAll()
-            return result
+            contentSem.signal()
+        }
+        if contentSem.wait(timeout: .now() + 15) == .timedOut {
+            throw RecorderError.setupFailed("SCShareableContent timed out (screen recording permission may need restart)")
+        }
+        let content: SCShareableContent
+        switch contentResult {
+        case .success(let c): content = c
+        case .failure(let e): throw RecorderError.setupFailed("SCShareableContent: \(e.localizedDescription)")
+        case nil: throw RecorderError.setupFailed("SCShareableContent failed")
         }
         let mainID = CGMainDisplayID()
         guard let display = content.displays.first(where: { $0.displayID == mainID })
@@ -173,10 +179,12 @@ final class Recorder: NSObject {
         if waitResult == .timedOut {
             stream.stopCapture { _ in }
             writer.cancelWriting()
+            try? FileManager.default.removeItem(at: url) // 清理 0 字节文件
             throw RecorderError.setupFailed("startCapture timed out (screen recording permission may need restart)")
         }
         if let captureError {
             writer.cancelWriting()
+            try? FileManager.default.removeItem(at: url)
             throw RecorderError.setupFailed("startCapture: \(captureError.localizedDescription)")
         }
 
