@@ -6,16 +6,19 @@
   let recordingTimer = null;
 
   // 页面消息 = service worker 的响应(请求-响应模型)或事件广播
-  function callHost(payload) {
+  function callHost(payload, timeoutMs) {
     return new Promise((resolve, reject) => {
-      chrome.runtime.sendMessage({ type: "host-call", payload }, (resp) => {
-        if (chrome.runtime.lastError) {
-          reject(new Error(chrome.runtime.lastError.message));
-          return;
+      chrome.runtime.sendMessage(
+        { type: "host-call", payload, timeoutMs },
+        (resp) => {
+          if (chrome.runtime.lastError) {
+            reject(new Error(chrome.runtime.lastError.message));
+            return;
+          }
+          if (resp && resp.ok) resolve(resp.resp);
+          else reject(new Error((resp && resp.error) || "host error"));
         }
-        if (resp && resp.ok) resolve(resp.resp);
-        else reject(new Error((resp && resp.error) || "host error"));
-      });
+      );
     });
   }
 
@@ -145,7 +148,9 @@
         })
         .catch((e) => setError(String(e)));
     } else {
-      callHost({ cmd: "start-record" })
+      // 首次录制可能触发系统授权弹窗(宿主等待用户响应最长 15 秒),超时放宽到 35 秒
+      $("status-text").textContent = "正在请求录制…(如弹出系统授权窗请允许)";
+      callHost({ cmd: "start-record" }, 35000)
         .then(() => setRecording(true))
         .catch((e) => setError(permissionGuide(String(e))));
     }

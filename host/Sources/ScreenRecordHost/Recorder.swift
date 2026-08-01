@@ -160,8 +160,8 @@ final class Recorder: NSObject {
         session.addInput(input)
         session.startRunning()
         defer { session.stopRunning() }
-        for _ in 0..<200 {
-            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms × 200 = 20s
+        for _ in 0..<150 {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms × 150 = 15s
             if CGPreflightScreenCaptureAccess() { return }
         }
     }

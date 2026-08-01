@@ -109,7 +109,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: "forbidden sender" });
       return false;
     }
-    hostCall(msg.payload)
+    const timeoutMs = typeof msg.timeoutMs === "number" ? msg.timeoutMs : 10000;
+    hostCall(msg.payload, timeoutMs)
       .then((resp) => sendResponse({ ok: true, resp }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
     return true; // 异步响应
