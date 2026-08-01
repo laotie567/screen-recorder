@@ -61,10 +61,11 @@ enum CommandHandler {
             }
 
         case "status":
+            let snap = Recorder.shared.stateSnapshot
             NativeMessaging.send([
                 "ok": true,
-                "recording": Recorder.shared.isRecording,
-                "recordingSince": Recorder.shared.recordingSince.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
+                "recording": snap.isRecording,
+                "recordingSince": snap.recordingSince.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
                 "outputDir": AppInfo.outputDirectory.path,
             ])
 

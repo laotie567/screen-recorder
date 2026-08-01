@@ -11,6 +11,7 @@ build:
 
 test: build
 	python3 Tests/protocol_smoke.py $(BIN)
+	python3 ../installer/verify_key.py
 	swift Tests/check_js.swift ../extension/background/service-worker.js ../extension/popup/popup.js ../extension/annotate/annotate.js
 
 clean:

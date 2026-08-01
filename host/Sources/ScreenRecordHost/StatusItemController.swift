@@ -35,7 +35,7 @@ final class StatusItemController: NSObject {
         menu.addItem(quitItem)
         statusItem.menu = menu
 
-        updateUI(recording: Recorder.shared.isRecording)
+        updateUI(recording: Recorder.shared.stateSnapshot.isRecording)
 
         // 订阅录制状态变化(主线程更新 UI)
         NotificationCenter.default.addObserver(
@@ -92,13 +92,13 @@ final class StatusItemController: NSObject {
 
     @objc private func quit() {
         // 录制中退出:先停止,等 recording-stopped(文件已落盘)再退出,定时器仅兜底
-        if Recorder.shared.isRecording {
+        if Recorder.shared.stateSnapshot.isRecording {
             _ = try? Recorder.shared.stop()
             var done = false
             NotificationCenter.default.addObserver(
                 forName: Recorder.statusChanged, object: nil, queue: .main
             ) { _ in
-                if !done && !Recorder.shared.isRecording {
+                if !done && !Recorder.shared.stateSnapshot.isRecording {
                     done = true
                     NSApp.terminate(nil)
                 }

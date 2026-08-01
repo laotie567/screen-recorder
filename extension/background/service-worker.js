@@ -109,7 +109,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       sendResponse({ ok: false, error: "forbidden sender" });
       return false;
     }
-    const timeoutMs = typeof msg.timeoutMs === "number" ? msg.timeoutMs : 10000;
+    // 消息级超时:仅接受有限数值并钳制在 [1000, 60000] 毫秒
+    let timeoutMs = Math.min(Math.max(typeof msg.timeoutMs === "number" && Number.isFinite(msg.timeoutMs) ? msg.timeoutMs : 10000, 1000), 60000);
     hostCall(msg.payload, timeoutMs)
       .then((resp) => sendResponse({ ok: true, resp }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));

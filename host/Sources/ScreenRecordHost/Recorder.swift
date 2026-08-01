@@ -33,6 +33,31 @@ final class Recorder: NSObject {
     private(set) var recordingSince: Date?
     private(set) var currentFileURL: URL?
 
+    /// 状态锁:保护状态字段跨线程访问(消息循环线程 / 采样线程 / SCK 回调)
+    private let stateLock = NSLock()
+
+    private func withState<T>(_ body: () throws -> T) rethrows -> T {
+        stateLock.lock()
+        defer { stateLock.unlock() }
+        return try body()
+    }
+
+    /// 线程安全状态快照(供外部查询,避免无锁读)
+    struct StateSnapshot {
+        let isRecording: Bool
+        let recordingSince: Date?
+        let currentFileURL: URL?
+    }
+    var stateSnapshot: StateSnapshot {
+        withState {
+            StateSnapshot(
+                isRecording: isRecording,
+                recordingSince: recordingSince,
+                currentFileURL: currentFileURL
+            )
+        }
+    }
+
     static let statusChanged = Notification.Name("com.screenrecord.recorder.statusChanged")
 
     /// 状态变化通知(录制开始/结束/失败),由 CommandHandler 与菜单栏 UI 订阅
@@ -61,7 +86,7 @@ final class Recorder: NSObject {
     // MARK: - 开始
 
     func start() async throws {
-        guard !isRecording else { throw RecorderError.alreadyRecording }
+        guard !withState({ isRecording }) else { throw RecorderError.alreadyRecording }
 
         // 屏幕录制权限:未授权时先触发系统授权弹窗。
         // 注意:只有真正调用录制 API 才会弹窗(CGPreflightScreenCaptureAccess 仅查询)。
@@ -129,21 +154,24 @@ final class Recorder: NSObject {
             throw RecorderError.setupFailed("startCapture: \(error.localizedDescription)")
         }
 
-        self.stream = stream
-        self.writer = writer
-        self.videoInput = videoIn
-        self.audioInput = audioIn
-        self.sessionStartTime = nil
-        self.currentFileURL = url
-        self.isRecording = true
-        self.recordingSince = Date()
+        withState {
+            self.stream = stream
+            self.writer = writer
+            self.videoInput = videoIn
+            self.audioInput = audioIn
+            self.sessionStartTime = nil
+            self.currentFileURL = url
+            self.isRecording = true
+            self.recordingSince = Date()
+        }
 
         // 混音输出 → 写音轨
         mixer.onOutput = { [weak self] sampleBuffer in
-            guard let self, let writer = self.writer, writer.status == .writing else { return }
-            if let audioInput = self.audioInput, audioInput.isReadyForMoreMediaData {
-                audioInput.append(sampleBuffer)
-            }
+            guard let self else { return }
+            let (writer, audioInput) = self.withState { (self.writer, self.audioInput) }
+            guard let writer, writer.status == .writing,
+                  let audioInput, audioInput.isReadyForMoreMediaData else { return }
+            audioInput.append(sampleBuffer)
         }
 
         notifyStatus("recording-started", ["file": url.lastPathComponent])
@@ -174,10 +202,13 @@ final class Recorder: NSObject {
     }
 
     func stop() throws -> StopResult {
-        guard isRecording, let stream, let writer else { throw RecorderError.notRecording }
-        let url = currentFileURL
-        let startedAt = recordingSince ?? Date()
-        isRecording = false
+        let (stream, writer, url, startedAt) = try withState { () -> (SCStream?, AVAssetWriter?, URL?, Date) in
+            guard isRecording else { throw RecorderError.notRecording }
+            let tuple = (self.stream, self.writer, currentFileURL, recordingSince ?? Date())
+            isRecording = false
+            return tuple
+        }
+        guard let stream, let writer else { throw RecorderError.notRecording }
 
         stream.stopCapture { _ in }
 
@@ -186,7 +217,8 @@ final class Recorder: NSObject {
             writer.finishWriting { [weak self] in
                 guard let self else { return }
                 // 竞态保护:如果停止后用户已开始新录制(currentFileURL 已变),旧回调不得清理新状态
-                guard self.currentFileURL == url else { return }
+                let current = self.withState { self.currentFileURL }
+                guard current == url else { return }
                 let duration = Date().timeIntervalSince(startedAt)
                 if writer.status == .completed {
                     // 屏幕内容敏感:显式 0600
@@ -195,15 +227,19 @@ final class Recorder: NSObject {
                             [.posixPermissions: 0o600], ofItemAtPath: url.path
                         )
                     }
-                    self.currentFileURL = nil
-                    self.recordingSince = nil
+                    self.withState {
+                        self.currentFileURL = nil
+                        self.recordingSince = nil
+                    }
                     self.notifyStatus("recording-stopped", [
                         "file": url?.lastPathComponent ?? "",
                         "duration": duration,
                     ])
                 } else {
-                    self.currentFileURL = nil
-                    self.recordingSince = nil
+                    self.withState {
+                        self.currentFileURL = nil
+                        self.recordingSince = nil
+                    }
                     self.notifyStatus("recording-failed", [
                         "file": url?.lastPathComponent ?? "",
                         "error": writer.error?.localizedDescription ?? "unknown",
@@ -216,15 +252,20 @@ final class Recorder: NSObject {
     }
 
     private func failWriter(_ writer: AVAssetWriter) {
-        guard isRecording else { return } // 幂等,只通知一次
-        isRecording = false
-        let url = currentFileURL
-        currentFileURL = nil
-        recordingSince = nil
+        // 锁内更新状态(幂等:仅首次 isRecording=true 时执行),锁外通知
+        let (url, stream) = withState { () -> (URL?, SCStream?) in
+            guard isRecording else { return (nil, nil) }
+            isRecording = false
+            let u = currentFileURL
+            currentFileURL = nil
+            recordingSince = nil
+            return (u, self.stream)
+        }
+        guard let url else { return }
         stream?.stopCapture { _ in }
         notifyStatus("recording-failed", [
             "error": writer.error?.localizedDescription ?? "write failed",
-            "file": url?.lastPathComponent ?? "",
+            "file": url.lastPathComponent,
         ])
     }
 
@@ -288,21 +329,23 @@ final class Recorder: NSObject {
 
 extension Recorder: SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
+        let (writer, isRec) = withState { (self.writer, self.isRecording) }
         guard let writer else { return }
         // writer 进入 failed(磁盘满/编码失败):主动停止并通知,而不是静默丢帧
         if writer.status == .failed {
             failWriter(writer)
             return
         }
-        guard isRecording, writer.status == .writing else { return }
+        guard isRec, writer.status == .writing else { return }
 
-        if sessionStartTime == nil {
-            sessionStartTime = sampleBuffer.presentationTimeStamp
+        if withState({ self.sessionStartTime }) == nil {
+            withState { self.sessionStartTime = sampleBuffer.presentationTimeStamp }
             writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
         }
 
         switch type {
         case .screen:
+            let videoInput = withState { self.videoInput }
             if let videoInput, videoInput.isReadyForMoreMediaData {
                 videoInput.append(sampleBuffer)
             }
@@ -321,10 +364,14 @@ extension Recorder: SCStreamOutput {
 extension Recorder: SCStreamDelegate {
     func stream(_ stream: SCStream, didStopWithError error: Error) {
         // 身份守卫:旧流的错误回调不得污染新录制状态(与 stop 的 finish 回调一致)
-        guard self.stream === stream else { return }
-        isRecording = false
-        recordingSince = nil
-        currentFileURL = nil
+        let shouldNotify = withState { () -> Bool in
+            guard self.stream === stream else { return false }
+            isRecording = false
+            recordingSince = nil
+            currentFileURL = nil
+            return true
+        }
+        guard shouldNotify else { return }
         notifyStatus("recording-failed", ["error": error.localizedDescription])
     }
 }

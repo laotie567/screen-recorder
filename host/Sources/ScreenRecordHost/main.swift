@@ -13,11 +13,11 @@ umask(0o077)
 // 录制中 EOF 时等待录制结束(避免测试/无头录制截断文件)。
 if ProcessInfo.processInfo.environment["SCREENRECORDHOST_NO_APPKIT"] == "1" {
     runMessageLoop()
-    if Recorder.shared.isRecording {
+    if Recorder.shared.stateSnapshot.isRecording {
         NotificationCenter.default.addObserver(
             forName: Recorder.statusChanged, object: nil, queue: nil
         ) { _ in
-            if !Recorder.shared.isRecording {
+            if !Recorder.shared.stateSnapshot.isRecording {
                 exit(0)
             }
         }
@@ -54,11 +54,11 @@ DispatchQueue.global(qos: .userInitiated).async {
     let terminate = {
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }
-    if Recorder.shared.isRecording {
+    if Recorder.shared.stateSnapshot.isRecording {
         NotificationCenter.default.addObserver(
             forName: Recorder.statusChanged, object: nil, queue: nil
         ) { _ in
-            if !Recorder.shared.isRecording {
+            if !Recorder.shared.stateSnapshot.isRecording {
                 terminate()
             }
         }

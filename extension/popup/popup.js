@@ -82,7 +82,8 @@
   }
 
   function refreshStatus() {
-    callHost({ cmd: "status" })
+    // 超时放宽到 25s:避免首次授权流程(最长 15s 弹窗等待)期间的状态查询排队超时
+    callHost({ cmd: "status" }, 25000)
       .then((resp) => {
         setRecording(resp.recording === true);
       })
