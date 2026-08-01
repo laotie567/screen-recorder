@@ -15,10 +15,12 @@ echo "==> 1/4 构建宿主(Release)..."
 
 echo "==> 2/4 打包 app bundle 到 $APP_DIR ..."
 # 升级/重装:先退出运行中的旧实例,避免双实例双菜单栏图标
-# 注意:pkill 必须匹配宿主二进制完整路径,避免误杀安装脚本自身(路径含同名目录时)
-if pgrep -f "$APP_DIR/Contents/MacOS/$APP_NAME" >/dev/null 2>&1; then
+# 注意:pkill 必须匹配宿主二进制完整路径,避免误杀安装脚本自身(路径含同名目录时);
+# -F 用固定字符串匹配,避免正则元字符误匹配
+HOST_BIN="$APP_DIR/Contents/MacOS/$APP_NAME"
+if pgrep -F "$HOST_BIN" >/dev/null 2>&1; then
     echo "    检测到运行中的宿主,正在退出旧实例..."
-    pkill -f "$APP_DIR/Contents/MacOS/$APP_NAME" 2>/dev/null || true
+    pkill -F "$HOST_BIN" 2>/dev/null || true
     sleep 1
 fi
 rm -rf "$APP_DIR"

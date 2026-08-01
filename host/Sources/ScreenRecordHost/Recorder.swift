@@ -339,8 +339,17 @@ extension Recorder: SCStreamOutput {
         guard isRec, writer.status == .writing else { return }
 
         if withState({ self.sessionStartTime }) == nil {
-            withState { self.sessionStartTime = sampleBuffer.presentationTimeStamp }
-            writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
+            // 合并为单次加锁:检查+赋值原子,避免并发回调重复 startSession
+            let isFirst = withState { () -> Bool in
+                if self.sessionStartTime == nil {
+                    self.sessionStartTime = sampleBuffer.presentationTimeStamp
+                    return true
+                }
+                return false
+            }
+            if isFirst {
+                writer.startSession(atSourceTime: sampleBuffer.presentationTimeStamp)
+            }
         }
 
         switch type {
