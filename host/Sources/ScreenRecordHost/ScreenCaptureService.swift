@@ -23,7 +23,8 @@ enum ScreenCaptureService {
             throw ScreenCaptureError.permissionDenied
         }
 
-        // SCShareableContent 在权限异常时可能长时间不返回(SCK 已知怪癖),加超时保护
+        // SCShareableContent 在权限异常时可能长时间不返回(SCK 已知怪癖),加超时保护。
+        // 注意:Task 捕获非 Sendable 变量,依赖信号量内存序同步(swift-tools 5.10 宽松并发下合法)
         let contentSem = DispatchSemaphore(value: 0)
         var contentResult: Result<SCShareableContent, Error>?
         Task {
