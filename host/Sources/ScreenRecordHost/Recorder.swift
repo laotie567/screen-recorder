@@ -150,7 +150,7 @@ final class Recorder: NSObject {
     }
 
     /// 触发屏幕录制 TCC 授权弹窗:启动一个 AVCaptureScreenInput 会话,
-    /// 轮询等待用户响应(最多 20 秒),然后停止会话。
+    /// 轮询等待用户响应(最多 15 秒),然后停止会话。
     /// 注意:屏幕录制授权变更后,TCC 通常要求重启进程才完全生效,
     /// 授权后首次录制若仍失败,popup 会引导重启宿主。
     private func triggerScreenPermissionPrompt() async {
