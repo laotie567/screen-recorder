@@ -46,7 +46,13 @@
   function permissionGuide(errorText) {
     if (errorText && errorText.includes("permission")) {
       return (
-        "需要系统权限:\n1. 打开 系统设置 → 隐私与安全性\n2. 「屏幕录制」与「麦克风」中勾选 ScreenRecordHost\n3. 权限变更后需重启宿主(菜单栏图标 → 退出,再点录制自动拉起)\n\n" +
+        "需要系统权限:\n" +
+        "1. 打开 系统设置 → 隐私与安全性\n" +
+        "2. 「屏幕录制」与「麦克风」:若列表中有 ScreenRecordHost 直接勾选;\n" +
+        "   若找不到 → 点列表下方的「+」→ 按 Cmd+Shift+G 输入:\n" +
+        "   ~/Applications/ScreenRecordHost.app → 打开 → 勾选\n" +
+        "3. 「麦克风」同样操作\n" +
+        "4. 权限变更后需重启宿主(菜单栏图标 → 退出,再点录制自动拉起)\n\n" +
         errorText
       );
     }
