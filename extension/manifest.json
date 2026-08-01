@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "录屏批注助手",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "桌面录屏(浏览器最小化仍可录制全屏+系统音频)、截图与批注",
   "key": "-----BEGIN PUBLIC KEY-----\nMIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAnWhIQovV3CggUKuZ6+tb\nqT9Qrms+f3pKbTocIoGM02E3zB88vVUwPkcTOntI8xv6Rr1tt6IJ0VjbcFlWxI+F\n0fggTPbQEFjkgZ+uf4eBSLdVIbP+OuTNk+hpKwKqODGKF1/63hILDpB2Dj6+R/rz\n44yjJOAw//hRICB5SW9kqz4Tjz/vt1q6v3VQQWtCgad0aAsRuOLeSeHfh+fqxfFK\nnuREMQjjHsDDdaUZBE42WOHAMtO43FyINC/2ySlJ6u0RHfgNJWPlGssgZsT9GtYf\nTwNdBO6dWhkQS9tRY2yttnFM4yNL01rfXs3mCPkZvR7qFCyJMbKLiKB0LUPbgFaZ\n3wIDAQAB\n-----END PUBLIC KEY-----",
   "permissions": ["nativeMessaging", "downloads", "clipboardWrite"],
