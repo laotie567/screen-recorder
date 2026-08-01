@@ -52,7 +52,7 @@ macOS 宿主(host/,Swift,无窗口菜单栏 app)
 ├── CommandHandler.swift            命令分发 + 事件推送(NotificationCenter → native messaging)
 ├── Recorder.swift                  录屏核心
 │   ├── start():TCC 弹窗触发(AVCaptureScreenInput)→ 麦克风授权 → SCShareableContent → SCStream
-│   ├── AVAssetWriter:H.264 + AAC,30fps,原生分辨率
+│   ├── AVAssetWriter:H.264 + AAC,60fps,物理像素分辨率,码率按分辨率+帧率自适应
 │   ├── stop():stopCapture → finishWriting(完成才推送 recording-stopped)
 │   ├── failWriter():writer 进入 failed(磁盘满等)主动停流推送事件
 │   └── stateLock:状态字段跨线程收敛(锁外通知防死锁)

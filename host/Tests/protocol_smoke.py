@@ -110,14 +110,21 @@ def main():
     if not (resp and resp.get("ok") is False):
         failures.append(f"read-file negative offset: got {resp}")
 
-    # 9. test-bitrate:码率档位自测(防分辨率/码率逻辑回归)
+    # 9. test-bitrate:码率档位自测(分辨率+帧率组合,防回归)
     send(proc, {"cmd": "test-bitrate"})
     resp = recv(proc)
     if resp and resp.get("ok"):
-        by_height = {item["height"]: item["bitrate"] for item in resp.get("items", [])}
-        expected = {2160: 24_000_000, 1440: 16_000_000, 1080: 12_000_000, 720: 8_000_000}
-        if by_height != expected:
-            failures.append(f"test-bitrate mismatch: {by_height} != {expected}")
+        got = {(item["height"], item["fps"]): item["bitrate"] for item in resp.get("items", [])}
+        expected = {
+            (2160, 60): 36_000_000,
+            (2160, 30): 24_000_000,
+            (1440, 60): 24_000_000,
+            (1080, 60): 18_000_000,
+            (1080, 30): 12_000_000,
+            (720, 30): 8_000_000,
+        }
+        if got != expected:
+            failures.append(f"test-bitrate mismatch: {got} != {expected}")
     else:
         failures.append(f"test-bitrate: got {resp}")
 

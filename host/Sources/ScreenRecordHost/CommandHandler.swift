@@ -152,14 +152,16 @@ enum CommandHandler {
             }
 
         case "test-bitrate":
-            // 码率档位自测(供冒烟测试断言,防分辨率/码率逻辑回归)
+            // 码率档位自测(供冒烟测试断言,防分辨率/帧率/码率逻辑回归)
             NativeMessaging.send([
                 "ok": true,
                 "items": [
-                    ["height": 2160, "bitrate": Recorder.bitrate(forPixelHeight: 2160)],
-                    ["height": 1440, "bitrate": Recorder.bitrate(forPixelHeight: 1440)],
-                    ["height": 1080, "bitrate": Recorder.bitrate(forPixelHeight: 1080)],
-                    ["height": 720, "bitrate": Recorder.bitrate(forPixelHeight: 720)],
+                    ["height": 2160, "fps": 60, "bitrate": Recorder.bitrate(forPixelHeight: 2160, fps: 60)],
+                    ["height": 2160, "fps": 30, "bitrate": Recorder.bitrate(forPixelHeight: 2160, fps: 30)],
+                    ["height": 1440, "fps": 60, "bitrate": Recorder.bitrate(forPixelHeight: 1440, fps: 60)],
+                    ["height": 1080, "fps": 60, "bitrate": Recorder.bitrate(forPixelHeight: 1080, fps: 60)],
+                    ["height": 1080, "fps": 30, "bitrate": Recorder.bitrate(forPixelHeight: 1080, fps: 30)],
+                    ["height": 720, "fps": 30, "bitrate": Recorder.bitrate(forPixelHeight: 720, fps: 30)],
                 ],
             ])
 
