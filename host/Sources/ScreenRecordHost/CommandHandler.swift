@@ -151,6 +151,18 @@ enum CommandHandler {
                 NativeMessaging.send(["ok": true])
             }
 
+        case "test-bitrate":
+            // 码率档位自测(供冒烟测试断言,防分辨率/码率逻辑回归)
+            NativeMessaging.send([
+                "ok": true,
+                "items": [
+                    ["height": 2160, "bitrate": Recorder.bitrate(forPixelHeight: 2160)],
+                    ["height": 1440, "bitrate": Recorder.bitrate(forPixelHeight: 1440)],
+                    ["height": 1080, "bitrate": Recorder.bitrate(forPixelHeight: 1080)],
+                    ["height": 720, "bitrate": Recorder.bitrate(forPixelHeight: 720)],
+                ],
+            ])
+
         case "quit":
             NativeMessaging.send(["ok": true])
             DispatchQueue.main.async {

@@ -110,19 +110,30 @@ def main():
     if not (resp and resp.get("ok") is False):
         failures.append(f"read-file negative offset: got {resp}")
 
-    # 9. test-mixer:音频混合逻辑自测(无需屏幕权限)
+    # 9. test-bitrate:码率档位自测(防分辨率/码率逻辑回归)
+    send(proc, {"cmd": "test-bitrate"})
+    resp = recv(proc)
+    if resp and resp.get("ok"):
+        by_height = {item["height"]: item["bitrate"] for item in resp.get("items", [])}
+        expected = {2160: 24_000_000, 1440: 16_000_000, 1080: 12_000_000, 720: 8_000_000}
+        if by_height != expected:
+            failures.append(f"test-bitrate mismatch: {by_height} != {expected}")
+    else:
+        failures.append(f"test-bitrate: got {resp}")
+
+    # 10. test-mixer:音频混合逻辑自测(无需屏幕权限)
     send(proc, {"cmd": "test-mixer"})
     resp = recv(proc)
     if not (resp and resp.get("ok")):
         failures.append(f"test-mixer: got {resp}")
 
-    # 10. 未知命令
+    # 11. 未知命令
     send(proc, {"cmd": "bogus"})
     resp = recv(proc)
     if not (resp and resp.get("ok") is False):
         failures.append(f"unknown cmd: got {resp}")
 
-    # 11. 缺 cmd 字段
+    # 12. 缺 cmd 字段
     send(proc, {"hello": "world"})
     resp = recv(proc)
     if not (resp and resp.get("ok") is False):

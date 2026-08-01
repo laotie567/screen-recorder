@@ -118,11 +118,17 @@ final class Recorder: NSObject {
             throw RecorderError.setupFailed("no display found")
         }
 
+        // 输出分辨率必须用物理像素,而不是逻辑点(width/height):
+        // Retina 屏逻辑 1728×1117 的物理像素是 3456×2234,用逻辑点录制只有 1/4 面积,视频会模糊
+        // SCDisplay 无 pixel 属性,用 CGDisplayPixelsWide/High 按 displayID 取物理像素(未废弃 API)
+        let pixelWidth = Int(CGDisplayPixelsWide(display.displayID))
+        let pixelHeight = Int(CGDisplayPixelsHigh(display.displayID))
+
         let filter = SCContentFilter(display: display, excludingWindows: [])
 
         let config = SCStreamConfiguration()
-        config.width = Int(display.width)
-        config.height = Int(display.height)
+        config.width = pixelWidth
+        config.height = pixelHeight
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.minimumFrameInterval = CMTime(value: 1, timescale: 30) // 30fps
         config.showsCursor = true
@@ -132,7 +138,7 @@ final class Recorder: NSObject {
         config.captureMicrophone = true // 麦克风采集(macOS 15+ 原生支持)
 
         let url = try nextOutputURL()
-        let (writer, videoIn, audioIn) = try makeWriter(outputURL: url, width: Int(display.width), height: Int(display.height))
+        let (writer, videoIn, audioIn) = try makeWriter(outputURL: url, width: pixelWidth, height: pixelHeight)
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: processingQueue)
@@ -287,6 +293,16 @@ final class Recorder: NSObject {
         return url
     }
 
+    /// 按输出像素高度选择 H.264 平均码率(分辨率越高码率越高,避免高分辨率下糊)
+    static func bitrate(forPixelHeight height: Int) -> Int {
+        switch height {
+        case 2160...: return 24_000_000  // 4K
+        case 1440...: return 16_000_000  // 2K
+        case 1080...: return 12_000_000  // FHD
+        default: return 8_000_000        // 720p 及以下
+        }
+    }
+
     private func makeWriter(outputURL url: URL, width: Int, height: Int) throws -> (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput) {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
 
@@ -295,7 +311,7 @@ final class Recorder: NSObject {
             AVVideoWidthKey: width,
             AVVideoHeightKey: height,
             AVVideoCompressionPropertiesKey: [
-                AVVideoAverageBitRateKey: 12_000_000,
+                AVVideoAverageBitRateKey: Recorder.bitrate(forPixelHeight: height),
                 AVVideoExpectedSourceFrameRateKey: 30,
                 AVVideoProfileLevelKey: AVVideoProfileLevelH264HighAutoLevel,
             ],
