@@ -1,5 +1,5 @@
 #!/bin/bash
-# 安装脚本:构建宿主 → 打包为无窗口菜单栏 app → ad-hoc 签名 →
+# 安装脚本:构建宿主 → 打包为无窗口菜单栏 app → 固定证书签名(失败回退 ad-hoc) →
 # 注册 Chrome native messaging host → 打印扩展加载指引。
 set -euo pipefail
 
@@ -76,8 +76,9 @@ else
     rm -rf "$TMP_CERT_DIR"
 fi
 if [ -n "$SIGN_IDENTITY" ]; then
-    if ! codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR" 2>/dev/null; then
-        echo "    ⚠ 证书签名失败,回退 ad-hoc(每次重装需重新勾选权限)"
+    if ! codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR" 2>&1; then
+        echo "    ⚠ 证书签名失败(见上方错误),回退 ad-hoc(每次重装需重新勾选权限)"
+        SIGN_IDENTITY="" # 清空:最终提示按实际签名方式显示
         codesign --force --sign - "$APP_DIR"
     fi
 else
