@@ -24,7 +24,7 @@ enum RecorderError: LocalizedError {
     }
 }
 
-/// 录屏核心:ScreenCaptureKit 采集主屏全屏 + 系统音频,AVAssetWriter 输出 MP4(H.264+AAC,30fps)。
+/// 录屏核心:ScreenCaptureKit 采集主屏全屏 + 系统音频,AVAssetWriter 输出 MP4(H.264+AAC,60fps)。
 /// 麦克风混合在第 4 步接入(届时系统音频改走 AudioMixer)。
 final class Recorder: NSObject {
     static let shared = Recorder()
