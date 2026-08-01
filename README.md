@@ -6,6 +6,14 @@ Chrome 扩展(MV3)+ macOS 本地宿主(Native Messaging Host)双组件方案:
 > 纯 Chrome 扩展无法做到这一点:标签页隐藏时 Chromium 会强制暂停屏幕共享,
 > 且 macOS 上扩展无法捕获系统音频。因此真正干活的是一同安装的本地宿主进程。
 
+## 文档导航
+
+| 文档 | 内容 |
+|---|---|
+| [README.md](README.md) | 功能 / 安装 / 使用 / 架构 / 限制(本文) |
+| [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) | 开发指南:架构、协议参考、测试、发版流程、常见开发坑 |
+| [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) | 故障排查:权限 / 连接 / 录制 / 菜单栏 / 安装 / 私钥 |
+
 ## 功能
 
 - **录屏**:主屏全屏,30fps,H.264+AAC,MP4 输出到 `~/Movies/ScreenRecord/`

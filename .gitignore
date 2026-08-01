@@ -1,4 +1,13 @@
+# 构建产物
 host/.build/
+
+# macOS
 .DS_Store
+
+# 扩展签名私钥(只存在于构建机,严禁提交)
 installer/extension-key.pem
 installer/extension-key.pub.pem
+
+# 会话/环境元数据(非项目代码)
+.reasonix/
+update-mattpocock-skills.sh
