@@ -4,6 +4,7 @@
 
   let recording = false;
   let recordingTimer = null;
+  let hostPath = ""; // 宿主可执行文件绝对路径(status 查询返回,权限添加时显示)
 
   // 页面消息 = service worker 的响应(请求-响应模型)或事件广播
   function callHost(payload, timeoutMs) {
@@ -50,9 +51,10 @@
         "1. 打开 系统设置 → 隐私与安全性\n" +
         "2. 「屏幕录制」与「麦克风」:若列表中有 ScreenRecordHost 直接勾选;\n" +
         "   若找不到 → 点列表下方的「+」→ 按 Cmd+Shift+G 输入:\n" +
-        "   ~/Applications/ScreenRecordHost.app → 打开 → 勾选\n" +
+        "   " + (hostPath || "~/Applications/ScreenRecordHost.app") + "\n" +
+        "   注意:填写的是宿主可执行文件的路径(.app 内,见上方)\n" +
         "3. 「麦克风」同样操作\n" +
-        "4. 权限变更后需重启宿主(菜单栏图标 → 退出,再点录制自动拉起)\n\n" +
+        "4. 权限变更后需重启宿主:完全退出 Chrome 再重开,或菜单栏图标 → 退出\n\n" +
         errorText
       );
     }
@@ -91,6 +93,7 @@
     // 超时放宽到 25s:避免首次授权流程(最长 15s 弹窗等待)期间的状态查询排队超时
     callHost({ cmd: "status" }, 25000)
       .then((resp) => {
+        if (resp && resp.hostPath) hostPath = resp.hostPath;
         setRecording(resp.recording === true);
       })
       .catch((e) => {

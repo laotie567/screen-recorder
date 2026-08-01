@@ -68,6 +68,7 @@ enum CommandHandler {
                 "recording": snap.isRecording,
                 "recordingSince": snap.recordingSince.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
                 "outputDir": AppInfo.outputDirectory.path,
+                "hostPath": CommandLine.arguments[0], // 宿主可执行文件绝对路径(权限添加时用)
             ])
 
         case "capture-screen":
