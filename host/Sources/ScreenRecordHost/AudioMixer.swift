@@ -405,11 +405,16 @@ extension AudioMixer {
             }
         }
 
-        // 积压上限测试:只推 6 秒麦克风(系统音频侧无待消费数据),积压应被截断到 5 秒上限
+        // 积压上限测试:先推 0.5s 系统音频(无 mic,直接输出、数组残留),再推 6 秒麦克风。
+        // 覆盖"另一路曾输出后停止"场景(旧 isEmpty 判定在此场景失效,CI 可拦截回归)。
+        guard let shortSys = makeTestCMSampleBuffer(
+            sampleRate: 48_000, channels: 2, seconds: 0.5, leftValue: 0.5, rightValue: 0.5
+        ) else { return "failed to build short sys buffer" }
         guard let longMic = makeTestCMSampleBuffer(
             sampleRate: 48_000, channels: 2, seconds: 6.0, leftValue: 0.3, rightValue: 0.3
         ) else { return "failed to build long mic buffer" }
         let m2 = AudioMixer()
+        m2.push(shortSys, isMicrophone: false)
         m2.push(longMic, isMicrophone: true)
         let state = m2.debugDescription
         // 6 秒数据(576000 Float)超过 5 秒上限(480000),丢弃最老 48000 帧:start=48000 count=480000
