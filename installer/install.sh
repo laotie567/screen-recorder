@@ -76,7 +76,10 @@ else
     rm -rf "$TMP_CERT_DIR"
 fi
 if [ -n "$SIGN_IDENTITY" ]; then
-    codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR"
+    if ! codesign --force --sign "$SIGN_IDENTITY" "$APP_DIR" 2>/dev/null; then
+        echo "    ⚠ 证书签名失败,回退 ad-hoc(每次重装需重新勾选权限)"
+        codesign --force --sign - "$APP_DIR"
+    fi
 else
     codesign --force --sign - "$APP_DIR"
 fi

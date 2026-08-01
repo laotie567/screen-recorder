@@ -134,19 +134,19 @@ def main():
     else:
         failures.append(f"test-bitrate: got {resp}")
 
-    # 10. test-mixer:音频混合逻辑自测(无需屏幕权限)
+    # 11. test-mixer:音频混合逻辑自测(无需屏幕权限)
     send(proc, {"cmd": "test-mixer"})
     resp = recv(proc)
     if not (resp and resp.get("ok")):
         failures.append(f"test-mixer: got {resp}")
 
-    # 11. 未知命令
+    # 12. 未知命令
     send(proc, {"cmd": "bogus"})
     resp = recv(proc)
     if not (resp and resp.get("ok") is False):
         failures.append(f"unknown cmd: got {resp}")
 
-    # 12. 缺 cmd 字段
+    # 13. 缺 cmd 字段
     send(proc, {"hello": "world"})
     resp = recv(proc)
     if not (resp and resp.get("ok") is False):
