@@ -36,14 +36,24 @@ enum ScreenCaptureService {
         config.width = Int(CGDisplayPixelsWide(display.displayID))
         config.height = Int(CGDisplayPixelsHigh(display.displayID))
 
-        let image = try await withCheckedThrowingContinuation { (cont: CheckedContinuation<CGImage, Error>) in
-            SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, error in
-                if let image {
-                    cont.resume(returning: image)
-                } else {
-                    cont.resume(throwing: ScreenCaptureError.captureFailed(error?.localizedDescription ?? "captureImage returned nil"))
-                }
-            }
+        // captureImage 的 completion 在权限异常时可能不回调(SCK 已知怪癖),
+        // 用信号量 + 超时保护,避免宿主无限挂起
+        let captureSem = DispatchSemaphore(value: 0)
+        var capturedImage: CGImage?
+        var captureError: Error?
+        SCScreenshotManager.captureImage(contentFilter: filter, configuration: config) { image, error in
+            capturedImage = image
+            captureError = error
+            captureSem.signal()
+        }
+        if captureSem.wait(timeout: .now() + 20) == .timedOut {
+            throw ScreenCaptureError.captureFailed("captureImage timed out (screen recording permission may need restart)")
+        }
+        if let captureError {
+            throw ScreenCaptureError.captureFailed(captureError.localizedDescription)
+        }
+        guard let image = capturedImage else {
+            throw ScreenCaptureError.captureFailed("captureImage returned nil")
         }
 
         let rep = NSBitmapImageRep(cgImage: image)

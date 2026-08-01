@@ -111,7 +111,22 @@ final class Recorder: NSObject {
             throw RecorderError.micPermissionDenied
         }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        // SCShareableContent 在权限异常时可能长时间不返回(SCK 已知怪癖),
+        // 用超时竞速保护,让"卡住"变成明确错误
+        let content = try await withThrowingTaskGroup(of: SCShareableContent.self) { group in
+            group.addTask {
+                try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+            }
+            group.addTask {
+                try await Task.sleep(nanoseconds: 15_000_000_000) // 15s
+                throw RecorderError.setupFailed("SCShareableContent timed out (screen recording permission may need restart)")
+            }
+            guard let result = try await group.next() else {
+                throw RecorderError.setupFailed("SCShareableContent failed")
+            }
+            group.cancelAll()
+            return result
+        }
         let mainID = CGMainDisplayID()
         guard let display = content.displays.first(where: { $0.displayID == mainID })
                 ?? content.displays.first else {
@@ -146,19 +161,23 @@ final class Recorder: NSObject {
         try stream.addStreamOutput(self, type: .audio, sampleHandlerQueue: processingQueue)
         try stream.addStreamOutput(self, type: .microphone, sampleHandlerQueue: processingQueue)
 
-        do {
-            try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
-                stream.startCapture { error in
-                    if let error {
-                        cont.resume(throwing: error)
-                    } else {
-                        cont.resume()
-                    }
-                }
-            }
-        } catch {
+        // startCapture 的 completion 在权限异常时可能不回调(SCK 已知怪癖),
+        // 用信号量 + 超时保护,避免宿主无限挂起导致 popup "host timeout"
+        let captureSem = DispatchSemaphore(value: 0)
+        var captureError: Error?
+        stream.startCapture { error in
+            captureError = error
+            captureSem.signal()
+        }
+        let waitResult = captureSem.wait(timeout: .now() + 20)
+        if waitResult == .timedOut {
+            stream.stopCapture { _ in }
             writer.cancelWriting()
-            throw RecorderError.setupFailed("startCapture: \(error.localizedDescription)")
+            throw RecorderError.setupFailed("startCapture timed out (screen recording permission may need restart)")
+        }
+        if let captureError {
+            writer.cancelWriting()
+            throw RecorderError.setupFailed("startCapture: \(captureError.localizedDescription)")
         }
 
         withState {
