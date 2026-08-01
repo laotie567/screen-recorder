@@ -62,6 +62,14 @@ final class Recorder: NSObject {
 
     func start() async throws {
         guard !isRecording else { throw RecorderError.alreadyRecording }
+
+        // 屏幕录制权限:未授权时先触发系统授权弹窗。
+        // 注意:只有真正调用录制 API 才会弹窗(CGPreflightScreenCaptureAccess 仅查询)。
+        // CGWindowListCreateImage 在 macOS 15 起不可用,改用 AVCaptureScreenInput
+        // (仍可用且未授权时会触发 TCC 弹窗;已拒绝时不会重复弹窗)。
+        if !CGPreflightScreenCaptureAccess() {
+            await triggerScreenPermissionPrompt()
+        }
         guard CGPreflightScreenCaptureAccess() else {
             throw RecorderError.permissionDenied
         }
@@ -141,6 +149,23 @@ final class Recorder: NSObject {
         notifyStatus("recording-started", ["file": url.lastPathComponent])
     }
 
+    /// 触发屏幕录制 TCC 授权弹窗:启动一个 AVCaptureScreenInput 会话,
+    /// 轮询等待用户响应(最多 20 秒),然后停止会话。
+    /// 注意:屏幕录制授权变更后,TCC 通常要求重启进程才完全生效,
+    /// 授权后首次录制若仍失败,popup 会引导重启宿主。
+    private func triggerScreenPermissionPrompt() async {
+        let session = AVCaptureSession()
+        guard let input = AVCaptureScreenInput(displayID: CGMainDisplayID()),
+              session.canAddInput(input) else { return }
+        session.addInput(input)
+        session.startRunning()
+        defer { session.stopRunning() }
+        for _ in 0..<200 {
+            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms × 200 = 20s
+            if CGPreflightScreenCaptureAccess() { return }
+        }
+    }
+
     // MARK: - 停止
 
     struct StopResult {
@@ -188,6 +213,19 @@ final class Recorder: NSObject {
         }
 
         return StopResult(file: url?.lastPathComponent ?? "", duration: Date().timeIntervalSince(startedAt))
+    }
+
+    private func failWriter(_ writer: AVAssetWriter) {
+        guard isRecording else { return } // 幂等,只通知一次
+        isRecording = false
+        let url = currentFileURL
+        currentFileURL = nil
+        recordingSince = nil
+        stream?.stopCapture { _ in }
+        notifyStatus("recording-failed", [
+            "error": writer.error?.localizedDescription ?? "write failed",
+            "file": url?.lastPathComponent ?? "",
+        ])
     }
 
     // MARK: - 输出文件
@@ -250,7 +288,13 @@ final class Recorder: NSObject {
 
 extension Recorder: SCStreamOutput {
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard isRecording, let writer, writer.status == .writing else { return }
+        guard let writer else { return }
+        // writer 进入 failed(磁盘满/编码失败):主动停止并通知,而不是静默丢帧
+        if writer.status == .failed {
+            failWriter(writer)
+            return
+        }
+        guard isRecording, writer.status == .writing else { return }
 
         if sessionStartTime == nil {
             sessionStartTime = sampleBuffer.presentationTimeStamp

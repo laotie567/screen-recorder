@@ -86,7 +86,18 @@ enum CommandHandler {
                 NativeMessaging.send(["ok": false, "error": "missing path field"])
                 return
             }
-            NativeMessaging.send(["ok": RecordingStore.reveal(path: path)])
+            // 与 read-file 一致:解析 symlink 后校验目录白名单
+            let url = URL(fileURLWithPath: path).standardizedFileURL.resolvingSymlinksInPath()
+            let allowed = [AppInfo.outputDirectory.standardizedFileURL.resolvingSymlinksInPath(),
+                           AppInfo.supportDirectory.standardizedFileURL.resolvingSymlinksInPath()]
+            let isAllowed = allowed.contains { dir in
+                url.path == dir.path || url.path.hasPrefix(dir.path + "/")
+            }
+            guard isAllowed else {
+                NativeMessaging.send(["ok": false, "error": "path not allowed"])
+                return
+            }
+            NativeMessaging.send(["ok": RecordingStore.reveal(path: url.path)])
 
         case "read-file":
             // 分块读取本地文件(base64),供批注页加载截图。仅限宿主自己的两个目录,防路径穿越。

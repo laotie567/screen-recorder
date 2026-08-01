@@ -127,6 +127,8 @@
     } else if (msg && msg.event === "recording-stopped") {
       setRecording(false);
       renderRecordings();
+      // 文件已落盘(writer finishWriting 完成后才推送该事件)
+      $("status-text").textContent = msg.file ? `已保存:${msg.file}` : "已停止";
     } else if (msg && msg.event === "recording-failed") {
       setRecording(false);
       setError(permissionGuide(msg.error));
@@ -137,10 +139,9 @@
     setError(null);
     if (recording) {
       callHost({ cmd: "stop-record" })
-        .then((resp) => {
+        .then(() => {
           setRecording(false);
-          renderRecordings();
-          setError(resp.file ? `已保存:${resp.file}` : null);
+          $("status-text").textContent = "停止中…"; // 落盘确认由 recording-stopped 事件驱动
         })
         .catch((e) => setError(String(e)));
     } else {

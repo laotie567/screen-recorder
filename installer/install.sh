@@ -14,6 +14,12 @@ echo "==> 1/4 构建宿主(Release)..."
 ( cd "$HOST_DIR" && swift build -c release --disable-sandbox )
 
 echo "==> 2/4 打包 app bundle 到 $APP_DIR ..."
+# 升级/重装:先退出运行中的旧实例,避免双实例双菜单栏图标
+if pgrep -f "$APP_NAME" >/dev/null 2>&1; then
+    echo "    检测到运行中的宿主,正在退出旧实例..."
+    pkill -f "$APP_NAME" 2>/dev/null || true
+    sleep 1
+fi
 rm -rf "$APP_DIR"
 mkdir -p "$APP_DIR/Contents/MacOS" "$APP_DIR/Contents/Resources"
 cp "$HOST_DIR/.build/release/$APP_NAME" "$APP_DIR/Contents/MacOS/$APP_NAME"
@@ -39,7 +45,7 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 PLIST
 
 echo "==> 3/4 ad-hoc 签名(录屏/麦克风 TCC 权限按 bundle 记录)..."
-codesign --force --sign - "$APP_DIR" 2>/dev/null
+codesign --force --sign - "$APP_DIR"
 
 echo "==> 4/4 注册 native messaging host..."
 NM_DIR="$HOME/Library/Application Support/Google/Chrome/NativeMessagingHosts"
@@ -59,8 +65,12 @@ echo "✔ 安装完成:"
 echo "  - 宿主: $APP_DIR"
 echo "  - host manifest: $NM_DIR/$BUNDLE_ID.json"
 echo
+echo "⚠ 升级/重装提示:ad-hoc 签名每次生成新的 CDHash,"
+echo "  macOS 的屏幕录制/麦克风授权按签名记录,重装后需在"
+echo "  「系统设置 → 隐私与安全性」中重新勾选 ScreenRecordHost。"
+echo
 echo "下一步(首次):"
 echo "  1. 打开 chrome://extensions,开启「开发者模式」"
 echo "  2. 「加载已解压的扩展程序」,选择: $ROOT/extension"
-echo "  3. 点扩展图标 → 录屏 → 按系统提示授予「屏幕录制」「麦克风」权限"
-echo "  4. 授权后需重启宿主(菜单栏图标 → 退出,再点一次录屏自动拉起)"
+echo "  3. 点扩展图标 → 录屏 → 首次会弹系统授权窗,分别允许「屏幕录制」「麦克风」"
+echo "  4. 授权后如提示无法录制,重启宿主(菜单栏图标 → 退出,再点一次录屏自动拉起)"
