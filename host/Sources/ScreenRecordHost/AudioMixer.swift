@@ -53,8 +53,8 @@ final class AudioMixer {
                 micConverter = nil // 重置,格式缓存按需重建
             }
             micFrames.append(contentsOf: frames)
-            // 单路积压上限:系统音频长时间无数据时丢弃最老的麦克风数据
-            if sysFrames.isEmpty, micFrames.count > maxBacklogFrames * 2 {
+            // 单路积压上限:系统音频无待消费数据时(从未有/已消费完,如静音)丢弃最老的麦克风数据
+            if sysCursor >= sysFrames.count / 2, micFrames.count > maxBacklogFrames * 2 {
                 let drop = micFrames.count - maxBacklogFrames * 2 // 偶数
                 micFrames.removeFirst(drop)
                 micStart += drop / 2
@@ -65,8 +65,8 @@ final class AudioMixer {
                 sysConverter = nil
             }
             sysFrames.append(contentsOf: frames)
-            // 单路积压上限:麦克风长时间无数据时丢弃最老的系统音频数据
-            if micFrames.isEmpty, sysFrames.count > maxBacklogFrames * 2 {
+            // 单路积压上限:麦克风无待消费数据时丢弃最老的系统音频数据
+            if micCursor >= micFrames.count / 2, sysFrames.count > maxBacklogFrames * 2 {
                 let drop = sysFrames.count - maxBacklogFrames * 2 // 偶数
                 sysFrames.removeFirst(drop)
                 sysStart += drop / 2
@@ -403,6 +403,18 @@ extension AudioMixer {
             if abs(v - 0.8) > 0.01 {
                 return "mid-frame value mismatch at frame \(i / 2) ch\(i % 2): got \(v), want ~0.8"
             }
+        }
+
+        // 积压上限测试:只推 6 秒麦克风(系统音频侧无待消费数据),积压应被截断到 5 秒上限
+        guard let longMic = makeTestCMSampleBuffer(
+            sampleRate: 48_000, channels: 2, seconds: 6.0, leftValue: 0.3, rightValue: 0.3
+        ) else { return "failed to build long mic buffer" }
+        let m2 = AudioMixer()
+        m2.push(longMic, isMicrophone: true)
+        let state = m2.debugDescription
+        // 6 秒数据(576000 Float)超过 5 秒上限(480000),丢弃最老 48000 帧:start=48000 count=480000
+        if !state.contains("mic(start=48000 count=480000") {
+            return "backlog cap not applied: \(state)"
         }
         return nil
     }
