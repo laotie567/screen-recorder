@@ -23,7 +23,27 @@ enum ScreenCaptureService {
             throw ScreenCaptureError.permissionDenied
         }
 
-        let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+        // SCShareableContent 在权限异常时可能长时间不返回(SCK 已知怪癖),加超时保护
+        let contentSem = DispatchSemaphore(value: 0)
+        var contentResult: Result<SCShareableContent, Error>?
+        Task {
+            do {
+                let c = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                contentResult = .success(c)
+            } catch {
+                contentResult = .failure(error)
+            }
+            contentSem.signal()
+        }
+        if contentSem.wait(timeout: .now() + 15) == .timedOut {
+            throw ScreenCaptureError.captureFailed("SCShareableContent timed out (screen recording permission may need restart)")
+        }
+        let content: SCShareableContent
+        switch contentResult {
+        case .success(let c): content = c
+        case .failure(let e): throw ScreenCaptureError.captureFailed("SCShareableContent: \(e.localizedDescription)")
+        case nil: throw ScreenCaptureError.captureFailed("SCShareableContent failed")
+        }
         let mainID = CGMainDisplayID()
         guard let display = content.displays.first(where: { $0.displayID == mainID })
                 ?? content.displays.first else {

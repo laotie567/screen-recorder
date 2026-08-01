@@ -115,6 +115,8 @@ final class Recorder: NSObject {
         // 与 startCapture 一致用信号量 + 超时保护(不依赖任务取消,TG 取消不可靠)
         let contentSem = DispatchSemaphore(value: 0)
         var contentResult: Result<SCShareableContent, Error>?
+        // 注意:Task 捕获非 Sendable 变量,依赖信号量内存序同步(swift-tools 5.10 宽松并发下合法;
+        // 升级 Swift 6 严格并发需改为 actor/锁)
         Task {
             do {
                 let c = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -160,7 +162,13 @@ final class Recorder: NSObject {
         config.captureMicrophone = true // 麦克风采集(macOS 15+ 原生支持)
 
         let url = try nextOutputURL()
-        let (writer, videoIn, audioIn) = try makeWriter(outputURL: url, width: pixelWidth, height: pixelHeight, fps: frameRate)
+        let (writer, videoIn, audioIn): (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput)
+        do {
+            (writer, videoIn, audioIn) = try makeWriter(outputURL: url, width: pixelWidth, height: pixelHeight, fps: frameRate)
+        } catch {
+            try? FileManager.default.removeItem(at: url) // 清理 0 字节文件
+            throw error
+        }
 
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: processingQueue)
