@@ -1,5 +1,10 @@
 import AppKit
+import Darwin
 import Foundation
+
+// 屏幕内容敏感:进程级 umask 077,所有新建文件默认 0600、目录 0700,
+// 消除录制中 MP4 的权限窗口期(显式 chmod 600 作为兜底保留)
+umask(0o077)
 
 // MARK: - 入口
 
