@@ -119,7 +119,13 @@ enum CommandHandler {
                 NativeMessaging.send(["ok": false, "error": "seek failed: \(error.localizedDescription)"])
                 return
             }
-            let data = (try? handle.read(upToCount: size)) ?? Data()
+            let data: Data
+            do {
+                data = try handle.read(upToCount: size) ?? Data()
+            } catch {
+                NativeMessaging.send(["ok": false, "error": "read failed: \(error.localizedDescription)"])
+                return
+            }
             NativeMessaging.send([
                 "ok": true,
                 "data": data.base64EncodedString(),

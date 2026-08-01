@@ -218,6 +218,9 @@ final class AudioMixer {
         }
 
         let bufferList = UnsafeMutablePointer<AudioBufferList>.allocate(capacity: sizeNeeded)
+        // 注意:noCopy 的 srcPCM 在 convert() 全程引用该结构,
+        // 释放必须延后到函数退出(defer),提前 deallocate 会构成 use-after-free
+        defer { bufferList.deallocate() }
         let fillStatus = CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer(
             sampleBuffer,
             bufferListSizeNeededOut: nil,
@@ -231,10 +234,8 @@ final class AudioMixer {
         guard fillStatus == noErr,
               let srcPCM = AVAudioPCMBuffer(pcmFormat: srcFormat, bufferListNoCopy: UnsafePointer(bufferList)) else {
             fputs("convert: fill failed status=\(fillStatus)\n", stderr)
-            bufferList.deallocate()
             return nil
         }
-        bufferList.deallocate() // 数据本体由 blockBuffer 持有,列表结构可释放
 
         let pts = CMSampleBufferGetPresentationTimeStamp(sampleBuffer)
         let startFrame = Int((pts.seconds * AudioMixer.sampleRate).rounded())

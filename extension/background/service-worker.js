@@ -100,8 +100,15 @@ function broadcast(msg) {
 }
 
 // 页面请求:popup / 批注页通过 {type:"host-call", payload} 调用宿主
-chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
+// 仅接受扩展自身页面(扩展页 URL 以 chrome-extension:// 开头且 host 为本扩展)
+const EXT_URL_PREFIX = chrome.runtime.getURL("");
+
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg && msg.type === "host-call") {
+    if (!sender || !sender.url || !sender.url.startsWith(EXT_URL_PREFIX)) {
+      sendResponse({ ok: false, error: "forbidden sender" });
+      return false;
+    }
     hostCall(msg.payload)
       .then((resp) => sendResponse({ ok: true, resp }))
       .catch((err) => sendResponse({ ok: false, error: err.message }));
