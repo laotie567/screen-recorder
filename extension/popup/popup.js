@@ -48,13 +48,14 @@
     if (errorText && errorText.includes("permission")) {
       return (
         "需要系统权限:\n" +
-        "1. 打开 系统设置 → 隐私与安全性\n" +
-        "2. 「屏幕录制」与「麦克风」:若列表中有 ScreenRecordHost 直接勾选;\n" +
-        "   若找不到 → 点列表下方的「+」→ 按 Cmd+Shift+G 输入:\n" +
-        "   " + (hostPath || "~/Applications/ScreenRecordHost.app") + "\n" +
-        "   注意:填写的是宿主可执行文件的路径(.app 内,见上方)\n" +
+        "1. 打开 系统设置 → 隐私与安全性 → 屏幕录制\n" +
+        "2. 若列表中有 ScreenRecordHost 直接勾选;\n" +
+        "   若找不到 → 点「+」→ Cmd+Shift+G → 粘贴:\n" +
+        "   " + (hostPath ? hostPath.replace(/\/Contents\/MacOS\/.*$/, ".app") : "~/Applications/ScreenRecordHost.app") + "\n" +
+        "   (即 ScreenRecordHost.app 的路径)→ 打开 → 勾选\n" +
         "3. 「麦克风」同样操作\n" +
-        "4. 权限变更后需重启宿主:完全退出 Chrome 再重开,或菜单栏图标 → 退出\n\n" +
+        "4. 授权后回这里再点一次「开始录制」:宿主会自动重启并生效\n" +
+        "   (若仍报错,再点一次即可;不需要重启 Chrome)\n\n" +
         errorText
       );
     }
@@ -162,7 +163,18 @@
       $("status-text").textContent = "正在请求录制…(如弹出系统授权窗请允许)";
       callHost({ cmd: "start-record" }, 35000)
         .then(() => setRecording(true))
-        .catch((e) => setError(permissionGuide(String(e))));
+        .catch((e) => {
+          // 报错时顺带查询权限真实状态,区分"未授权"与"已授权但宿主需重试"
+          callHost({ cmd: "check-permission" }, 10000)
+            .then((perm) => {
+              if (perm && perm.screenRecording === true) {
+                setError("已检测到屏幕录制权限已授权。请再点一次「开始录制」(授权后宿主需要重启生效)。");
+              } else {
+                setError(permissionGuide(String(e)));
+              }
+            })
+            .catch(() => setError(permissionGuide(String(e))));
+        });
     }
   });
 

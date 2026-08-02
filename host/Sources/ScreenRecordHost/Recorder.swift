@@ -16,7 +16,8 @@ enum RecorderError: LocalizedError {
         switch self {
         case .alreadyRecording: return "already recording"
         case .notRecording: return "not recording"
-        case .permissionDenied: return "screen recording permission denied"
+        case .permissionDenied:
+            return "screen recording permission denied — 请先在 系统设置→隐私与安全性→屏幕录制 勾选 ScreenRecordHost,然后回到这里再点一次「开始录制」(宿主会自动重启并生效)"
         case .micPermissionDenied: return "microphone permission denied"
         case .setupFailed(let msg): return "setup failed: \(msg)"
         case .writeFailed(let msg): return "write failed: \(msg)"
@@ -32,6 +33,8 @@ final class Recorder: NSObject {
     private(set) var isRecording = false
     private(set) var recordingSince: Date?
     private(set) var currentFileURL: URL?
+    /// 启动进行中标志:start() 全程可达数十秒(权限/采集),防止期间二次 start 泄漏 stream
+    private var isStarting = false
 
     /// 状态锁:保护状态字段跨线程访问(消息循环线程 / 采样线程 / SCK 回调)
     private let stateLock = NSLock()
@@ -86,33 +89,19 @@ final class Recorder: NSObject {
     // MARK: - 开始
 
     func start() async throws {
-        guard !withState({ isRecording }) else { throw RecorderError.alreadyRecording }
-
-        // 屏幕录制权限:未授权时先触发系统授权弹窗。
-        // 注意:只有真正调用录制 API 才会弹窗(CGPreflightScreenCaptureAccess 仅查询)。
-        // CGWindowListCreateImage 在 macOS 15 起不可用,改用 AVCaptureScreenInput
-        // (仍可用且未授权时会触发 TCC 弹窗;已拒绝时不会重复弹窗)。
-        if !CGPreflightScreenCaptureAccess() {
-            await triggerScreenPermissionPrompt()
+        // starting 标志防并发二次启动(权限/采集流程可达数十秒)
+        let canStart = withState { () -> Bool in
+            guard !isRecording, !isStarting else { return false }
+            isStarting = true
+            return true
         }
-        guard CGPreflightScreenCaptureAccess() else {
-            throw RecorderError.permissionDenied
-        }
-
-        // 麦克风权限:未决时弹系统授权窗,拒绝则明确报错
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
-        case .authorized:
-            break
-        case .notDetermined:
-            guard await AVCaptureDevice.requestAccess(for: .audio) else {
-                throw RecorderError.micPermissionDenied
-            }
-        default:
-            throw RecorderError.micPermissionDenied
-        }
+        guard canStart else { throw RecorderError.alreadyRecording }
+        defer { withState { self.isStarting = false } }
 
         // SCShareableContent 在权限异常时可能长时间不返回(SCK 已知怪癖)。
-        // 与 startCapture 一致用信号量 + 超时保护(不依赖任务取消,TG 取消不可靠)
+        // 未授权时首次调用 SCShareableContent 本身会触发系统 TCC 授权弹窗(官方路径)。
+        // 用户允许后 macOS 可能直接重启本进程:此时本次调用会失败/超时,
+        // 下次再点「开始录制」即由 Chrome 拉起新进程,授权立即生效。
         let contentSem = DispatchSemaphore(value: 0)
         var contentResult: Result<SCShareableContent, Error>?
         // 注意:Task 捕获非 Sendable 变量,依赖信号量内存序同步(swift-tools 5.10 宽松并发下合法;
@@ -131,11 +120,36 @@ final class Recorder: NSObject {
         }
         let content: SCShareableContent
         switch contentResult {
-        case .success(let c): content = c
-        case .failure(let e): throw RecorderError.setupFailed("SCShareableContent: \(e.localizedDescription)")
-        case nil: throw RecorderError.setupFailed("SCShareableContent failed")
+        case .success(let c):
+            content = c
+        case .failure(let e):
+            // 内容获取失败:未授权时归为权限问题(并引导授权后重试)
+            if !CGPreflightScreenCaptureAccess() {
+                throw RecorderError.permissionDenied
+            }
+            throw RecorderError.setupFailed("SCShareableContent: \(e.localizedDescription)")
+        case nil:
+            throw RecorderError.setupFailed("SCShareableContent failed")
+        }
+        guard !content.displays.isEmpty else {
+            if !CGPreflightScreenCaptureAccess() {
+                throw RecorderError.permissionDenied
+            }
+            throw RecorderError.setupFailed("no display found")
         }
         let mainID = CGMainDisplayID()
+
+        // 麦克风权限:未决时弹系统授权窗,拒绝则明确报错
+        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        case .authorized:
+            break
+        case .notDetermined:
+            guard await AVCaptureDevice.requestAccess(for: .audio) else {
+                throw RecorderError.micPermissionDenied
+            }
+        default:
+            throw RecorderError.micPermissionDenied
+        }
         guard let display = content.displays.first(where: { $0.displayID == mainID })
                 ?? content.displays.first else {
             throw RecorderError.setupFailed("no display found")
