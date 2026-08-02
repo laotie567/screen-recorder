@@ -168,7 +168,11 @@
           callHost({ cmd: "check-permission" }, 10000)
             .then((perm) => {
               if (perm && perm.screenRecording === true) {
-                setError("已检测到屏幕录制权限已授权。请再点一次「开始录制」(授权后宿主需要重启生效)。");
+                if (perm.microphone === true) {
+                  setError("已检测到屏幕录制与麦克风权限均已授权。请再点一次「开始录制」(授权后宿主需要重启生效)。");
+                } else {
+                  setError("屏幕录制已授权,但麦克风未授权。请到 系统设置→隐私与安全性→麦克风 勾选 ScreenRecordHost,再点一次「开始录制」。");
+                }
               } else {
                 setError(permissionGuide(String(e)));
               }

@@ -233,23 +233,6 @@ final class Recorder: NSObject {
         notifyStatus("recording-started", ["file": url.lastPathComponent])
     }
 
-    /// 触发屏幕录制 TCC 授权弹窗:启动一个 AVCaptureScreenInput 会话,
-    /// 轮询等待用户响应(最多 15 秒),然后停止会话。
-    /// 注意:屏幕录制授权变更后,TCC 通常要求重启进程才完全生效,
-    /// 授权后首次录制若仍失败,popup 会引导重启宿主。
-    private func triggerScreenPermissionPrompt() async {
-        let session = AVCaptureSession()
-        guard let input = AVCaptureScreenInput(displayID: CGMainDisplayID()),
-              session.canAddInput(input) else { return }
-        session.addInput(input)
-        session.startRunning()
-        defer { session.stopRunning() }
-        for _ in 0..<150 {
-            try? await Task.sleep(nanoseconds: 100_000_000) // 100ms × 150 = 15s
-            if CGPreflightScreenCaptureAccess() { return }
-        }
-    }
-
     // MARK: - 停止
 
     struct StopResult {
