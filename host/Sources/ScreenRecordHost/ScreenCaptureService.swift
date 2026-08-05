@@ -9,7 +9,8 @@ enum ScreenCaptureError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .permissionDenied: return "screen recording permission denied"
+        case .permissionDenied:
+            return "screen recording permission denied — 请先在 系统设置→隐私与安全性→屏幕录制 勾选 ScreenRecordHost,然后回到这里再点一次「截图」(宿主会自动重启并生效)"
         case .captureFailed(let msg): return "capture failed: \(msg)"
         }
     }
@@ -19,14 +20,12 @@ enum ScreenCaptureError: LocalizedError {
 /// (全屏 PNG 可能超过 native messaging 1MB 单条上限,所以走文件路径而非 base64)
 enum ScreenCaptureService {
     static func captureMainDisplay() async throws -> URL {
-        guard CGPreflightScreenCaptureAccess() else {
-            throw ScreenCaptureError.permissionDenied
-        }
-
-        // SCShareableContent 在权限异常时可能长时间不返回(SCK 已知怪癖),加超时保护。
-        // 注意:Task 捕获非 Sendable 变量,依赖信号量内存序同步(swift-tools 5.10 宽松并发下合法)
+        // 与录屏一致的权限流程:先调 SCShareableContent(首次未授权时该调用本身会触发
+        // 系统 TCC 授权弹窗,官方路径),失败/空 displays 时才用 CGPreflight 兜底归类为
+        // permissionDenied(带"授权后重试"引导)。不要前置 CGPreflight guard,否则弹窗永不触发。
         let contentSem = DispatchSemaphore(value: 0)
         var contentResult: Result<SCShareableContent, Error>?
+        // 注意:Task 捕获非 Sendable 变量,依赖信号量内存序同步(swift-tools 5.10 宽松并发下合法)
         Task {
             do {
                 let c = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
@@ -41,13 +40,23 @@ enum ScreenCaptureService {
         }
         let content: SCShareableContent
         switch contentResult {
-        case .success(let c): content = c
-        case .failure(let e): throw ScreenCaptureError.captureFailed("SCShareableContent: \(e.localizedDescription)")
-        case nil: throw ScreenCaptureError.captureFailed("SCShareableContent failed")
+        case .success(let c):
+            content = c
+        case .failure(let e):
+            // 内容获取失败:未授权时归为权限问题(并引导授权后重试)
+            if !CGPreflightScreenCaptureAccess() {
+                throw ScreenCaptureError.permissionDenied
+            }
+            throw ScreenCaptureError.captureFailed("SCShareableContent: \(e.localizedDescription)")
+        case nil:
+            throw ScreenCaptureError.captureFailed("SCShareableContent failed")
         }
         let mainID = CGMainDisplayID()
         guard let display = content.displays.first(where: { $0.displayID == mainID })
                 ?? content.displays.first else {
+            if !CGPreflightScreenCaptureAccess() {
+                throw ScreenCaptureError.permissionDenied
+            }
             throw ScreenCaptureError.captureFailed("no display found")
         }
 
@@ -85,9 +94,16 @@ enum ScreenCaptureService {
         try AppInfo.ensureDirectories()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyyMMdd-HHmmss"
-        let url = AppInfo.supportDirectory
-            .appendingPathComponent("screenshot-\(formatter.string(from: Date()))")
-            .appendingPathExtension("png")
+        let base = "screenshot-\(formatter.string(from: Date()))"
+        var url = AppInfo.supportDirectory.appendingPathComponent(base).appendingPathExtension("png")
+        var index = 1
+        while FileManager.default.fileExists(atPath: url.path) {
+            // 文件名冲突递增,避免同一秒两次截图互相覆盖
+            url = AppInfo.supportDirectory
+                .appendingPathComponent("\(base)-\(index)")
+                .appendingPathExtension("png")
+            index += 1
+        }
         try pngData.write(to: url)
         // 屏幕内容敏感:显式 0600,防同机其他用户读取
         try? FileManager.default.setAttributes(
