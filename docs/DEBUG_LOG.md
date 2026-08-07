@@ -165,16 +165,18 @@ security list-keychains -d user
 - 脚本中无 `2>/dev/null` 时,`codesign` 会阻塞等待用户在 GUI 点「始终允许」。
 - 频繁调试(反复创建临时 keychain)可能让系统策略收紧,从「自动允许」变成「需确认」。
 
-### 修复(已落地)
+### 修复(已落地,实测稳定)
 **改用 login keychain 固定身份方案,彻底去掉临时 keychain:**
 - 证书**一次性导入登录钥匙串**(用户配合一次:输 Mac 密码 / 点「始终允许」)。
 - 之后 install.sh 直接 `codesign --sign "ScreenRecordHost Signing"`(从 login keychain 取身份),**秒级完成、无 GUI 弹窗、无 set-key-partition-list**。
 - install.sh 幂等:检测到 login keychain 已有身份则直接复用,跳过导入。
-- 实测:两次重装 CDHash 完全一致(`c97dcab1...`),5.8 秒完成全流程。
+- 实测:三次重装 CDHash 完全一致(`48780ad2...`),0.47 秒完成全流程。
 - 关键认知:自签证书的 `CSSMERR_TP_NOT_TRUSTED`(未受系统信任)**不影响 codesign 和 TCC**——签名不需要信任链,CDHash 稳定即可。
 
+> **GUI 卡死的偶发性**:login keychain 方案在首次导入 + 设 partition-list 时仍可能触发一次 GUI 授权窗(系统安全策略收紧时)。**特征**:`ps` 可见 `TrustedPeersHelper` 在跑,install.sh 挂起不退出。**应对**:在**自己终端**跑 `bash installer/install.sh`(非后台/非无头),看到弹窗输 Mac 密码 + 点「始终允许」即可。权限永久写入 keychain 后,后续 install.sh 全部免交互。卡死不是方案缺陷,是 macOS 安全交互的一次性确认。
+
 ### 寻源关键词
-`install.sh 卡住签名` · `codesign 阻塞` · `TrustedPeersHelper` ·`set-key-partition-list GUI 弹窗` · `钥匙串授权确认` · `login keychain 固定身份`
+`install.sh 卡住签名` · `codesign 阻塞` · `TrustedPeersHelper` ·`set-key-partition-list GUI 弹窗` · `钥匙串授权确认` · `login keychain 固定身份` · `偶发 GUI 卡死 在自己终端跑`
 
 ---
 
@@ -224,10 +226,12 @@ sqlite3 ~/Library/Application\ Support/com.apple.TCC/TCC.db \
    # 然后到系统设置重新勾选(关掉再打开,或「+」添加)
    ```
    ⚠️ 临时手段:下次重装 CDHash 又变又会失效。
-2. **根治**:修好 install.sh 固定签名流程(见 D-003),让 CDHash 跨重装稳定。
+2. **根治**:修好 install.sh 固定签名流程(见 D-007 login keychain 方案),让 CDHash 跨重装稳定(实测三次重装 CDHash 完全一致)。
+
+> **实战补充(多次重装的坑)**:调试期间若反复在 ad-hoc 与固定签名间切换,系统设置里会堆积**多条绑定不同 CDHash 的失效记录**(TCC「幽灵授权」)。表现:明明系统设置里勾选着 ScreenRecordHost,仍报「用户拒绝了 TCC」。**解法**:`tccutil reset` 三类全清(清掉所有历史记录)→ 重新授权一次绑定当前 CDHash。这是 D-001 在实际开发场景的延伸——不是方案失效,是历史污染。
 
 ### 寻源关键词
-`TCC denied` · `用户拒绝了TCC` · `permission denied 但已勾选` · `CDHash 变化` · `adhoc 签名` · `SCShareableContent failed` · `重装后权限失效`
+`TCC denied` · `用户拒绝了TCC` · `permission denied 但已勾选` · `CDHash 变化` · `adhoc 签名` · `SCShareableContent failed` · `重装后权限失效` · `幽灵授权` · `多条 TCC 记录堆积` · `多次重装切换签名`
 
 ---
 
