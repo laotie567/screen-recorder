@@ -45,10 +45,12 @@ if !CGPreflightScreenCaptureAccess() {
 }
 
 StatusItemController.shared.setup()
+HostLog.write("host started: version=\(AppInfo.version) pid=\(ProcessInfo.processInfo.processIdentifier)")
 
 // 后台消息循环线程
 DispatchQueue.global(qos: .userInitiated).async {
     runMessageLoop()
+    HostLog.write("stdin EOF (Chrome disconnected)")
     // stdin EOF(Chrome 断开)。非录制时立即退出;录制中保持到录制结束再退出,
     // 避免 Chrome 重连时拉起第二个宿主实例(双菜单栏图标)。
     let terminate = {

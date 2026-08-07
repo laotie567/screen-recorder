@@ -18,6 +18,13 @@ h1 { font-size: 15px; flex: 1; }
 @keyframes pulse { 50% { opacity: 0.4; } }
 
 #actions { display: flex; gap: 8px; margin-bottom: 10px; }
+
+#options { margin-bottom: 10px; }
+#options .check {
+  display: flex; align-items: center; gap: 6px;
+  font-size: 12px; color: #374151; cursor: pointer; user-select: none;
+}
+#options .check input { accent-color: #2563eb; cursor: pointer; }
 button {
   flex: 1;
   padding: 9px 0;

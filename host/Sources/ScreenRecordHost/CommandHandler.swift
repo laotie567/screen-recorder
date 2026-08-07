@@ -40,12 +40,22 @@ enum CommandHandler {
             ])
 
         case "start-record":
+            // camera: 可选布尔,开启后摄像头画面以画中画合成进同一 MP4
+            let camera = message["camera"] as? Bool ?? false
+            HostLog.write("start-record: camera=\(camera)")
             Task {
                 do {
-                    try await Recorder.shared.start()
-                    NativeMessaging.send(["ok": true])
+                    try await Recorder.shared.start(camera: camera)
+                    HostLog.write("start-record: ok camera=\(camera)")
+                    NativeMessaging.send(["ok": true, "camera": camera])
                 } catch {
+                    HostLog.write("start-record: FAILED: \(error.localizedDescription)")
                     NativeMessaging.send(["ok": false, "error": error.localizedDescription])
+                    // 注意:不再因启动失败而主动 exit(0)。
+                    // 旧逻辑在失败 0.3s 后自杀式退出,会杀掉 popup 紧接着发的 check-permission,
+                    // 导致用户只看到一段含糊的兜底报错、真实错误被吞。
+                    // 现在:宿主保持运行,popup 收到真实错误后引导用户去系统设置授权,
+                    // 下次点击由 Chrome 自动重连到本进程(或拉起新进程),权限状态即时刷新。
                 }
             }
 
@@ -66,6 +76,7 @@ enum CommandHandler {
             NativeMessaging.send([
                 "ok": true,
                 "recording": snap.isRecording,
+                "camera": snap.cameraActive,
                 "recordingSince": snap.recordingSince.map { ISO8601DateFormatter().string(from: $0) } ?? NSNull(),
                 "outputDir": AppInfo.outputDirectory.path,
                 "hostPath": CommandLine.arguments[0], // 宿主可执行文件绝对路径(权限添加时用)
@@ -147,11 +158,12 @@ enum CommandHandler {
             ])
 
         case "check-permission":
-            // 权限状态查询:验证屏幕录制/麦克风授权是否真的对当前宿主生效(排查用)
+            // 权限状态查询:验证屏幕录制/麦克风/摄像头授权是否真的对当前宿主生效(排查用)
             NativeMessaging.send([
                 "ok": true,
                 "screenRecording": CGPreflightScreenCaptureAccess(),
                 "microphone": AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+                "camera": AVCaptureDevice.authorizationStatus(for: .video) == .authorized,
             ])
 
         case "test-mixer":

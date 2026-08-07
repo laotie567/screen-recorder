@@ -1,6 +1,8 @@
 import AVFoundation
 import CoreGraphics
+import CoreImage
 import CoreMedia
+import Metal
 import ScreenCaptureKit
 import Foundation
 
@@ -50,13 +52,15 @@ final class Recorder: NSObject {
         let isRecording: Bool
         let recordingSince: Date?
         let currentFileURL: URL?
+        let cameraActive: Bool
     }
     var stateSnapshot: StateSnapshot {
         withState {
             StateSnapshot(
                 isRecording: isRecording,
                 recordingSince: recordingSince,
-                currentFileURL: currentFileURL
+                currentFileURL: currentFileURL,
+                cameraActive: isRecording && cameraEnabled
             )
         }
     }
@@ -84,11 +88,18 @@ final class Recorder: NSObject {
     private let mixer = AudioMixer()
     private let processingQueue = DispatchQueue(label: "com.screenrecord.recorder.processing")
 
+    // 摄像头画中画:开启时视频帧改走 CIContext 合成(屏幕全帧 + 摄像头右下角叠加),
+    // 经 AVAssetWriterInputPixelBufferAdaptor 写入;关闭时保持 sampleBuffer 直写零拷贝路径
+    private var pixelAdaptor: AVAssetWriterInputPixelBufferAdaptor?
+    private var ciContext: CIContext?
+    private(set) var cameraEnabled = false
+    private let ciColorSpace = CGColorSpace(name: CGColorSpace.sRGB)!
+
     private override init() { super.init() }
 
     // MARK: - 开始
 
-    func start() async throws {
+    func start(camera: Bool = false) async throws {
         // starting 标志防并发二次启动(权限/采集流程可达数十秒)
         let canStart = withState { () -> Bool in
             guard !isRecording, !isStarting else { return false }
@@ -116,14 +127,17 @@ final class Recorder: NSObject {
             contentSem.signal()
         }
         if contentSem.wait(timeout: .now() + 15) == .timedOut {
+            HostLog.write("recorder: SCShareableContent TIMED OUT after 15s")
             throw RecorderError.setupFailed("SCShareableContent timed out (screen recording permission may need restart)")
         }
         let content: SCShareableContent
         switch contentResult {
         case .success(let c):
+            HostLog.write("recorder: SCShareableContent ok, displays=\(c.displays.count)")
             content = c
         case .failure(let e):
             // 内容获取失败:未授权时归为权限问题(并引导授权后重试)
+            HostLog.write("recorder: SCShareableContent failed: \(e.localizedDescription)")
             if !CGPreflightScreenCaptureAccess() {
                 throw RecorderError.permissionDenied
             }
@@ -150,6 +164,26 @@ final class Recorder: NSObject {
         default:
             throw RecorderError.micPermissionDenied
         }
+
+        // 摄像头(可选):权限拒绝/无设备时明确报错,不静默降级——用户勾选了就是要录到
+        if camera {
+            HostLog.write("recorder: camera auth=\(AVCaptureDevice.authorizationStatus(for: .video).rawValue)")
+            try await CameraCapture.ensurePermission()
+            try CameraCapture.shared.start()
+            HostLog.write("recorder: camera started")
+        }
+        // 摄像头启动后的所有失败出口统一回收(幂等,do/catch 兜底)
+        do {
+            try startPipeline(camera: camera, mainID: mainID, content: content)
+        } catch {
+            stopCameraIfNeeded()
+            throw error
+        }
+    }
+
+    /// 采集管线:写盘 → SCStream → startCapture;成功后状态移交实例字段。
+    /// 仅被 start(camera:) 调用,异常由调用方回收摄像头。
+    private func startPipeline(camera: Bool, mainID: CGDirectDisplayID, content: SCShareableContent) throws {
         guard let display = content.displays.first(where: { $0.displayID == mainID })
                 ?? content.displays.first else {
             throw RecorderError.setupFailed("no display found")
@@ -176,9 +210,9 @@ final class Recorder: NSObject {
         config.captureMicrophone = true // 麦克风采集(macOS 15+ 原生支持)
 
         let url = try nextOutputURL()
-        let (writer, videoIn, audioIn): (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput)
+        let (writer, videoIn, audioIn, adaptor): (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor?)
         do {
-            (writer, videoIn, audioIn) = try makeWriter(outputURL: url, width: pixelWidth, height: pixelHeight, fps: frameRate)
+            (writer, videoIn, audioIn, adaptor) = try makeWriter(outputURL: url, width: pixelWidth, height: pixelHeight, fps: frameRate, camera: camera)
         } catch {
             try? FileManager.default.removeItem(at: url) // 清理 0 字节文件
             throw error
@@ -199,22 +233,33 @@ final class Recorder: NSObject {
         }
         let waitResult = captureSem.wait(timeout: .now() + 20)
         if waitResult == .timedOut {
+            HostLog.write("recorder: startCapture TIMED OUT after 20s")
             stream.stopCapture { _ in }
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: url) // 清理 0 字节文件
             throw RecorderError.setupFailed("startCapture timed out (screen recording permission may need restart)")
         }
         if let captureError {
+            HostLog.write("recorder: startCapture error: \(captureError.localizedDescription)")
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: url)
             throw RecorderError.setupFailed("startCapture: \(captureError.localizedDescription)")
         }
+        HostLog.write("recorder: capture started \(pixelWidth)x\(pixelHeight)@\(frameRate) camera=\(camera)")
 
         withState {
             self.stream = stream
             self.writer = writer
             self.videoInput = videoIn
             self.audioInput = audioIn
+            self.pixelAdaptor = adaptor
+            if adaptor != nil {
+                // Metal 优先(4K60 合成的性能关键);无 Metal 设备回退 CPU 管线
+                self.ciContext = MTLCreateSystemDefaultDevice().map { CIContext(mtlDevice: $0) } ?? CIContext()
+            } else {
+                self.ciContext = nil
+            }
+            self.cameraEnabled = camera
             self.sessionStartTime = nil
             self.currentFileURL = url
             self.isRecording = true
@@ -230,7 +275,17 @@ final class Recorder: NSObject {
             audioInput.append(sampleBuffer)
         }
 
-        notifyStatus("recording-started", ["file": url.lastPathComponent])
+        notifyStatus("recording-started", ["file": url.lastPathComponent, "camera": cameraEnabled])
+    }
+
+    /// 摄像头回收(幂等):录制开始失败/正常停止/异常终止的所有出口都必须走这里
+    private func stopCameraIfNeeded() {
+        withState {
+            cameraEnabled = false
+            pixelAdaptor = nil
+            ciContext = nil
+        }
+        CameraCapture.shared.stop()
     }
 
     // MARK: - 停止
@@ -250,6 +305,7 @@ final class Recorder: NSObject {
         guard let stream, let writer else { throw RecorderError.notRecording }
 
         stream.stopCapture { _ in }
+        stopCameraIfNeeded()
 
         processingQueue.async { [weak self] in
             guard let self else { return }
@@ -302,6 +358,7 @@ final class Recorder: NSObject {
         }
         guard let url else { return }
         stream?.stopCapture { _ in }
+        stopCameraIfNeeded()
         notifyStatus("recording-failed", [
             "error": writer.error?.localizedDescription ?? "write failed",
             "file": url.lastPathComponent,
@@ -339,7 +396,7 @@ final class Recorder: NSObject {
         return fps >= 60 ? base * 3 / 2 : base
     }
 
-    private func makeWriter(outputURL url: URL, width: Int, height: Int, fps: Int) throws -> (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput) {
+    private func makeWriter(outputURL url: URL, width: Int, height: Int, fps: Int, camera: Bool) throws -> (AVAssetWriter, AVAssetWriterInput, AVAssetWriterInput, AVAssetWriterInputPixelBufferAdaptor?) {
         let writer = try AVAssetWriter(outputURL: url, fileType: .mp4)
 
         let videoSettings: [String: Any] = [
@@ -354,6 +411,21 @@ final class Recorder: NSObject {
         ]
         let videoIn = AVAssetWriterInput(mediaType: .video, outputSettings: videoSettings)
         videoIn.expectsMediaDataInRealTime = true
+
+        // 摄像头模式:视频帧需经 CIContext 合成后由 adaptor 写入,
+        // adaptor 携带像素属性并为编码输入提供 CVPixelBufferPool
+        var adaptor: AVAssetWriterInputPixelBufferAdaptor?
+        if camera {
+            let pixelAttrs: [String: Any] = [
+                kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA,
+                kCVPixelBufferWidthKey as String: width,
+                kCVPixelBufferHeightKey as String: height,
+                kCVPixelBufferMetalCompatibilityKey as String: true,
+            ]
+            adaptor = AVAssetWriterInputPixelBufferAdaptor(
+                assetWriterInput: videoIn, sourcePixelBufferAttributes: pixelAttrs
+            )
+        }
 
         let audioSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatMPEG4AAC,
@@ -373,7 +445,35 @@ final class Recorder: NSObject {
         guard writer.startWriting() else {
             throw RecorderError.setupFailed(writer.error?.localizedDescription ?? "startWriting failed")
         }
-        return (writer, videoIn, audioIn)
+        return (writer, videoIn, audioIn, adaptor)
+    }
+
+    /// 摄像头画中画合成:屏幕帧为底,最新摄像头帧缩放到屏宽 1/4 叠于右下角(边距 2%)。
+    /// 摄像头尚未出帧时纯屏幕帧直渲,录制不会因摄像头启动延迟丢帧。
+    private func compositeFrame(_ sampleBuffer: CMSampleBuffer, adaptor: AVAssetWriterInputPixelBufferAdaptor, ci: CIContext) -> CVPixelBuffer? {
+        guard let screenBuffer = CMSampleBufferGetImageBuffer(sampleBuffer),
+              let pool = adaptor.pixelBufferPool else { return nil }
+        var dst: CVPixelBuffer?
+        guard CVPixelBufferPoolCreatePixelBuffer(kCFAllocatorDefault, pool, &dst) == kCVReturnSuccess,
+              let dstBuffer = dst else { return nil }
+
+        let screenImage = CIImage(cvPixelBuffer: screenBuffer)
+        var composed = screenImage
+        if let camBuffer = CameraCapture.shared.currentFrame() {
+            let camImage = CIImage(cvPixelBuffer: camBuffer)
+            let pipWidth = screenImage.extent.width / 4
+            let scale = pipWidth / camImage.extent.width
+            let margin = screenImage.extent.width * 0.02
+            // CI 坐标系原点在左下:translation 后的位置即视觉上的右下角
+            let transform = CGAffineTransform(scaleX: scale, y: scale)
+                .concatenating(CGAffineTransform(
+                    translationX: screenImage.extent.width - pipWidth - margin,
+                    y: margin
+                ))
+            composed = camImage.transformed(by: transform).composited(over: screenImage)
+        }
+        ci.render(composed, to: dstBuffer, bounds: screenImage.extent, colorSpace: ciColorSpace)
+        return dstBuffer
     }
 }
 
@@ -404,8 +504,14 @@ extension Recorder: SCStreamOutput {
 
         switch type {
         case .screen:
-            let videoInput = withState { self.videoInput }
-            if let videoInput, videoInput.isReadyForMoreMediaData {
+            let (videoInput, adaptor, ci) = withState { (self.videoInput, self.pixelAdaptor, self.ciContext) }
+            guard let videoInput, videoInput.isReadyForMoreMediaData else { return }
+            if let adaptor, let ci {
+                // 摄像头模式:合成画中画后按源帧 PTS 写入
+                if let composed = compositeFrame(sampleBuffer, adaptor: adaptor, ci: ci) {
+                    adaptor.append(composed, withPresentationTime: sampleBuffer.presentationTimeStamp)
+                }
+            } else {
                 videoInput.append(sampleBuffer)
             }
         case .audio:
@@ -431,6 +537,7 @@ extension Recorder: SCStreamDelegate {
             return true
         }
         guard shouldNotify else { return }
+        stopCameraIfNeeded()
         notifyStatus("recording-failed", ["error": error.localizedDescription])
     }
 }

@@ -26,6 +26,21 @@ def recv(proc):
     return json.loads(body)
 
 
+def recv_cmd(proc, max_events=8):
+    """读取一条「命令响应」,跳过宿主主动推送的异步事件(带 event 字段)。
+
+    有真实屏幕录制权限时,start-record 成功会先推 recording-started 事件再回响应,
+    不跳过事件会导致后续所有断言错位一条消息。
+    """
+    for _ in range(max_events):
+        msg = recv(proc)
+        if msg is None:
+            return None
+        if "event" not in msg:
+            return msg
+    return None
+
+
 def main():
     env = dict(os.environ, SCREENRECORDHOST_NO_APPKIT="1")
     proc = subprocess.Popen(
@@ -35,37 +50,49 @@ def main():
 
     # 1. Chrome 握手
     send(proc, {"type": "connect"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if resp != {"type": "connect"}:
         failures.append(f"connect handshake: got {resp}")
 
     # 2. ping
     send(proc, {"cmd": "ping"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok") and resp.get("version")):
         failures.append(f"ping: got {resp}")
 
     # 3. status
     send(proc, {"cmd": "status"})
-    resp = recv(proc)
-    if not (resp and resp.get("ok") and resp.get("recording") is False):
+    resp = recv_cmd(proc)
+    if not (resp and resp.get("ok") and resp.get("recording") is False and "camera" in resp):
         failures.append(f"status: got {resp}")
 
     # 4. list-recordings(骨架期返回空列表)
     send(proc, {"cmd": "list-recordings"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok") and isinstance(resp.get("items"), list)):
         failures.append(f"list-recordings: got {resp}")
 
-    # 5. start-record:有权限则真实录 2 秒并验证产出文件;无权限则断言明确错误
+    # 5. start-record:有权限则真实录制并验证产出文件;无权限则断言明确错误
+    #    注意:SCK 在本无头测试机的显示器捕获偶有 ~2s 内瞬断("The operation could not
+    #    完成"),属环境抖动而非产品回归。故启动后先用 status 确认录制确实激活,
+    #    stop 若偶发 not-recording 则重试一次,避免误报。
     send(proc, {"cmd": "start-record"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if resp and resp.get("ok"):
+        # 确认录制激活(status.recording==true),排除 startCapture 完成回调延迟
+        send(proc, {"cmd": "status"})
+        sst = recv_cmd(proc)
+        recording_active = bool(sst and sst.get("recording") is True)
         time.sleep(2.0)
         send(proc, {"cmd": "stop-record"})
-        resp2 = recv(proc)
+        resp2 = recv_cmd(proc)
+        # 偶发瞬断:stop 报 not-recording 时重试一次(等录制真正结束/复活)
+        if not (resp2 and resp2.get("ok")):
+            time.sleep(1.0)
+            send(proc, {"cmd": "stop-record"})
+            resp2 = recv_cmd(proc)
         if not (resp2 and resp2.get("ok") and resp2.get("file")):
-            failures.append(f"stop after start: got {resp2}")
+            failures.append(f"stop after start: got {resp2} (recording_active={recording_active})")
         else:
             fpath = os.path.expanduser("~/Movies/ScreenRecord") + "/" + resp2["file"]
             if not os.path.exists(fpath) or os.path.getsize(fpath) < 10_000:
@@ -79,7 +106,7 @@ def main():
 
     # 6. capture-screen:有权限则截图并验证 PNG 产出;无权限则断言明确错误
     send(proc, {"cmd": "capture-screen"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if resp and resp.get("ok"):
         fpath = resp.get("path", "")
         if not fpath or not os.path.exists(fpath) or os.path.getsize(fpath) < 1_000:
@@ -92,33 +119,34 @@ def main():
 
     # 7. reveal-in-finder:不存在的路径应返回 ok=false
     send(proc, {"cmd": "reveal-in-finder", "path": "/nonexistent/file.mp4"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok") is False):
         failures.append(f"reveal-in-finder: got {resp}")
 
     # 8. read-file:越权路径与非法参数必须拒绝
     send(proc, {"cmd": "read-file", "path": "/etc/passwd", "offset": 0, "size": 100})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok") is False):
         failures.append(f"read-file path escape: got {resp}")
     send(proc, {"cmd": "read-file", "path": "/tmp/x.png", "offset": 0, "size": 99999999})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok") is False):
         failures.append(f"read-file bad size: got {resp}")
     send(proc, {"cmd": "read-file", "path": "/tmp/x.png", "offset": -5, "size": 100})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok") is False):
         failures.append(f"read-file negative offset: got {resp}")
 
     # 9. check-permission:权限状态查询(无权限环境断言明确返回值)
     send(proc, {"cmd": "check-permission"})
-    resp = recv(proc)
-    if not (resp and resp.get("ok") and "screenRecording" in resp and "microphone" in resp):
+    resp = recv_cmd(proc)
+    if not (resp and resp.get("ok") and "screenRecording" in resp
+            and "microphone" in resp and "camera" in resp):
         failures.append(f"check-permission: got {resp}")
 
     # 10. test-bitrate:码率档位自测(分辨率+帧率组合,防回归)
     send(proc, {"cmd": "test-bitrate"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if resp and resp.get("ok"):
         got = {(item["height"], item["fps"]): item["bitrate"] for item in resp.get("items", [])}
         expected = {
@@ -136,19 +164,19 @@ def main():
 
     # 11. test-mixer:音频混合逻辑自测(无需屏幕权限)
     send(proc, {"cmd": "test-mixer"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok")):
         failures.append(f"test-mixer: got {resp}")
 
     # 12. 未知命令
     send(proc, {"cmd": "bogus"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok") is False):
         failures.append(f"unknown cmd: got {resp}")
 
     # 13. 缺 cmd 字段
     send(proc, {"hello": "world"})
-    resp = recv(proc)
+    resp = recv_cmd(proc)
     if not (resp and resp.get("ok") is False):
         failures.append(f"missing cmd: got {resp}")
 

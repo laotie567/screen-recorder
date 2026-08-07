@@ -2,7 +2,7 @@ import Foundation
 
 /// 全局信息:版本号、输出目录、数据目录
 enum AppInfo {
-    static let version = "0.2.0"
+    static let version = "0.3.2"
 
     /// 录制输出目录:~/Movies/ScreenRecord
     static let outputDirectory: URL = {

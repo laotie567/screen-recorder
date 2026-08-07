@@ -48,8 +48,12 @@ final class AudioMixer {
               !frames.isEmpty else { return }
 
         if isMicrophone {
-            if micFrames.isEmpty {
+            // 数组为空或已全部消费(该路曾中断):按新时间戳重置对齐基准,
+            // 避免把恢复后的帧拼到旧时间轴上造成音画漂移(8/1 崩溃族修复的延续)
+            if micFrames.isEmpty || micCursor >= micFrames.count / 2 {
+                micFrames.removeAll(keepingCapacity: true)
                 micStart = startFrame
+                micCursor = 0
                 micConverter = nil // 重置,格式缓存按需重建
             }
             micFrames.append(contentsOf: frames)
@@ -60,8 +64,10 @@ final class AudioMixer {
                 micStart += drop / 2
             }
         } else {
-            if sysFrames.isEmpty {
+            if sysFrames.isEmpty || sysCursor >= sysFrames.count / 2 {
+                sysFrames.removeAll(keepingCapacity: true)
                 sysStart = startFrame
+                sysCursor = 0
                 sysConverter = nil
             }
             sysFrames.append(contentsOf: frames)
