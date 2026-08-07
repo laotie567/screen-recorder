@@ -1,5 +1,5 @@
 #!/bin/bash
-# 安装脚本:构建宿主 → 打包为无窗口菜单栏 app → 固定自签证书签名(失败回退 ad-hoc) →
+# 安装脚本:构建宿主 → 打包为无窗口菜单栏 app → 固定证书签名(login keychain 身份,首次导入后免交互) →
 # 注册 Chrome native messaging host → 打印扩展加载指引。
 set -euo pipefail
 

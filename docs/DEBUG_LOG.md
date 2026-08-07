@@ -4,7 +4,24 @@
 > 每条记录包含:现象 / 排查命令 / 根因 / 修复 / 寻源关键词。
 > 日常小修不必登记;登记标准是「下次遇到同类问题会卡住超过 10 分钟」的坑。
 
-## 目录
+## 主题分类索引
+
+遇到问题时,先按症状归类,直接跳到对应记录:
+
+### 签名 / TCC 权限类(「勾选了权限却不能用」「重装后失效」「install.sh 卡住」)
+- **D-001** [最高发] 录屏/截图全部失效,报「用户拒绝了 TCC」→ ad-hoc 签名 CDHash 变化
+- **D-003** [根因] install.sh 固定签名从未真正成功(四个静默 bug)→ 临时 keychain 方案(已被 D-007 取代)
+- **D-007** [最终方案] install.sh 签名卡 GUI 弹窗 → 改用 login keychain 固定身份
+
+### 摄像头类(「摄像头录制失败」「浮窗消失」「startRunning 异常」)
+- **D-002** [根因] startRunning 在 begin/commit 事务内调用 → NSGenericException
+- **D-004** [中间态] isRunning 异步竞态诊断(被 D-002 根因取代,保留诊断价值)
+- **D-006** 圆形浮窗切到其他窗口后消失 → statusBar level + 保活通知
+
+### 连接 / 生命周期类(「必须刷新插件才能再录」)
+- **D-005** [根因] MV3 service worker 被终止 → SW 启动即预连接 + 断开后主动重连
+
+## 目录(时间倒序)
 
 - [D-005 录完一条不能连录,必须刷新插件](#d-005)
 - [D-006 圆形摄像头浮窗切到其他窗口后消失](#d-006)
@@ -240,6 +257,8 @@ codesign --keychain "$TMPKC" --force --sign "ScreenRecordHost Signing" "$APP"
 4. **用数组保存 + cleanup 钩子恢复搜索列表**:修复旧版字符串拼接导致的转义 bug(会把用户搜索列表污染成嵌套路径)。
 5. 修掉 SIGPIPE 误报:改用临时文件验证(`codesign -dv > tmpfile 2>&1; grep -q Authority tmpfile`),生产者写完即正常退出。
 6. **去掉所有 `2>/dev/null` 吞错**:签名失败时**明确 `exit 1` 中止 + 给出可操作指引**(清证书重生成 / 升级 openssl),不再静默回退 ad-hoc。
+
+> ⚠️ **演进注记**:本方案的「临时 keychain + set-key-partition-list」在频繁调试的机器上会触发系统钥匙串 GUI 授权弹窗卡死(详见 D-007)。**最终方案改用 login keychain 固定身份**(证书一次性导入登录钥匙串,之后 install.sh 直接 `codesign --sign`,无临时 keychain、无 set-key-partition-list)。本条保留作为根因诊断记录,实现以 D-007 的 login keychain 方案为准。
 
 ### 验证
 ```bash

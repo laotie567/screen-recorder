@@ -72,7 +72,7 @@ macOS 宿主(host/,Swift,无窗口菜单栏 app)
 └── AppInfo.swift                   版本/输出目录/数据目录
 
 installer/
-├── install.sh                      构建 → 打包 app → 固定自签证书签名(legacy p12 + 临时钥匙串加入搜索列表,失败明确中止)→ 注册 manifest
+├── install.sh                      构建 → 打包 app → 固定证书签名(login keychain 身份,首次导入后免交互)→ 注册 manifest
 ├── generate_key.py                 生成扩展固定 key(私钥不入库)
 └── verify_key.py                   校验 manifest 公钥 ↔ EXTENSION_ID(已接入 make test)
 ```
@@ -183,7 +183,7 @@ git worktree remove <repo>-dev && git branch -d dev
     - 私钥裸 PEM(`-----BEGIN PRIVATE KEY-----`)用 `security import -f pemseq` 会报 `Unknown format in import`;**必须打包成 PKCS#12 一次性导入**才能在 keychain 里配对成 identity。
     - OpenSSL3/LibreSSL 默认生成的 p12 用 AES,`security import` 报 `MAC verification failed`;**必须 `openssl pkcs12 -export -legacy`**(3DES)。
     - 自签证书要做 codesigning 身份,**必须 `CA:FALSE` 叶子证书** + `codeSigning` EKU(`CA:TRUE` 会被当作 CA,`find-identity -p codesigning` 返回 0)。
-    - 临时钥匙串**必须加入搜索列表**(`security list-keychains -d user -s "$TMPKC" ...`),否则即便 identity 已导入,codesign 仍报 `no identity found`(它只查搜索列表)。
+    - 临时钥匙串**必须加入搜索列表**(`security list-keychains -d user -s "$TMPKC" ...`),否则即便 identity 已导入,codesign 仍报 `no identity found`(它只查搜索列表)。**注:最终方案不用临时钥匙串**(改用 login keychain 固定身份,见坑 13),本条仅作临时 keychain 方案的认知记录。
 12. **`set -o pipefail` + `grep -q` 的 SIGPIPE 陷阱**:`cmd | grep -q` 中 grep 匹配后退出关闭管道,生产者仍在写 → SIGPIPE → 退出码 141 → pipefail 让整条 `&&` 链判 false。**修法**:先写到临时文件再 `grep`,或 `set +o pipefail` 局部关闭。详见 DEBUG_LOG D-003。
 13. **免交互 codesign 的标准姿势(实测最稳:login keychain 固定身份)**:把自签证书**一次性导入登录钥匙串**(打包成 legacy p12:`openssl pkcs12 -export -legacy`,然后 `security import -k login.keychain-db`),设一次 `set-key-partition-list` 授权 codesign(用户配合一次:输 Mac 密码 / 点「始终允许」)。之后 install.sh 直接 `codesign --sign "CN"`(从 login keychain 取身份),秒级完成、无 GUI、CDHash 稳定。**不要用临时 keychain**:频繁创建/删除 + `set-key-partition-list` 会触发系统钥匙串授权 GUI 弹窗卡死(详见 DEBUG_LOG D-007)。自签证书的 `CSSMERR_TP_NOT_TRUSTED` 不影响 codesign 和 TCC(签名不需信任链)。详见 DEBUG_LOG D-003/D-007。
 14. **摄像头 `startRunning` 不能在 configuration block 内调用**:`AVCaptureSession` 在 `beginConfiguration()/commitConfiguration()` 之间调 `startRunning` 会抛 `NSGenericException`。**必须先 `commitConfiguration()` 再 `startRunning()`**。用 `defer { commitConfiguration() }` 会在 startRunning 之后才 commit,正好踩雷——用显式 `do/catch` + 显式 commit。详见 DEBUG_LOG D-002。
