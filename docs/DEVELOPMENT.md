@@ -51,14 +51,15 @@ macOS 宿主(host/,Swift,无窗口菜单栏 app)
 ├── NativeMessaging.swift           协议:4 字节小端长度前缀 + UTF-8 JSON;1MB 上限 guard
 ├── CommandHandler.swift            命令分发 + 事件推送(NotificationCenter → native messaging)
 ├── Recorder.swift                  录屏核心
-│   ├── start(camera:):TCC 弹窗触发(AVCaptureScreenInput)→ 麦克风授权 →(可选)摄像头授权+启动 → SCShareableContent → SCStream
+│   ├── start(camera:):SCShareableContent 触发 TCC → 麦克风授权 →(可选)摄像头授权+启动+浮窗 → SCStream
 │   ├── AVAssetWriter:H.264 + AAC,60fps,物理像素分辨率,码率按分辨率+帧率自适应
-│   ├── 摄像头画中画:CIContext 合成(屏幕全帧 + 摄像头右下 1/4 宽叠加)→ AVAssetWriterInputPixelBufferAdaptor 写入;关闭时保持 sampleBuffer 直写零拷贝路径
-│   ├── stop():stopCapture → finishWriting(完成才推送 recording-stopped)
+│   ├── 摄像头:原生圆形浮窗(CameraOverlayPanel)+ AVCaptureVideoPreviewLayer,屏幕录制自然捕获(所见即所得),不再 CIContext 合成
+│   ├── stop():stopCapture → 浮窗 hide → finishWriting(完成才推送 recording-stopped)
 │   ├── failWriter():writer 进入 failed(磁盘满等)主动停流推送事件
-│   ├── stopCameraIfNeeded():开始失败/停止/异常的所有出口统一回收摄像头
+│   ├── stopCameraIfNeeded():开始失败/停止/异常的所有出口统一回收摄像头+浮窗
 │   └── stateLock:状态字段跨线程收敛(锁外通知防死锁)
-├── CameraCapture.swift             摄像头采集(AVCaptureSession,720p BGRA,只保留最新帧)
+├── CameraOverlayPanel.swift        圆形摄像头悬浮窗(NSPanel,statusBar level,所见即所得;拖动/滚轮缩放/手柄缩放)
+├── CameraCapture.swift             摄像头采集(AVCaptureSession,720p BGRA,只保留最新帧;session 暴露给浮窗预览层)
 ├── AudioMixer.swift                系统音频 + 麦克风混合
 │   ├── AVAudioConverter:统一转 48kHz/2ch/Float32(44.1k→48k 重采样)
 │   ├── 帧号对齐(pts.seconds × 48000)逐帧相加,clamp 防削波
@@ -186,6 +187,8 @@ git worktree remove <repo>-dev && git branch -d dev
 12. **`set -o pipefail` + `grep -q` 的 SIGPIPE 陷阱**:`cmd | grep -q` 中 grep 匹配后退出关闭管道,生产者仍在写 → SIGPIPE → 退出码 141 → pipefail 让整条 `&&` 链判 false。**修法**:先写到临时文件再 `grep`,或 `set +o pipefail` 局部关闭。详见 DEBUG_LOG D-003。
 13. **免交互 codesign 的标准姿势**:随机密码临时钥匙串 → 导入 legacy p12 → `security set-key-partition-list -S apple-tool:,apple:,codesign:,security: -s -k <密码>` → 加入搜索列表 → `codesign --keychain <临时钥匙串> --sign`。完成后用数组保存的原始搜索列表恢复(字符串拼接会因路径转义污染用户 keychain 搜索列表)。直接导入登录钥匙串再签名会卡授权弹窗(密码不可知,无法 set-key-partition-list)。
 14. **摄像头 `startRunning` 不能在 configuration block 内调用**:`AVCaptureSession` 在 `beginConfiguration()/commitConfiguration()` 之间调 `startRunning` 会抛 `NSGenericException`。**必须先 `commitConfiguration()` 再 `startRunning()`**。用 `defer { commitConfiguration() }` 会在 startRunning 之后才 commit,正好踩雷——用显式 `do/catch` + 显式 commit。详见 DEBUG_LOG D-002。
-15. **摄像头画中画合成方向**:CI 坐标系原点在左下,PiP「右下角」= translation(x: 宽-图宽-边距, y: 边距);`CIImage(cvPixelBuffer:)` 渲染回同尺寸 buffer 方向自洽,已用合成 PNG 离线验证(屏幕左上标记不翻转、摄像头块在右下)。
+15. **摄像头浮窗(所见即所得)优于合成**:圆形摄像头用 `NSPanel` + `AVCaptureVideoPreviewLayer` 显示,`SCContentFilter(excludingWindows: [])` 自然捕获浮窗 → 拖动/缩放浮窗即调整 MP4 里摄像头位置大小,零延迟、零合成开销。比 CIContext 合成更简单、性能更好(旧合成路径已移除)。浮窗 level 用 `.statusBar`(非 `.floating`,后者切到其他 app 会被遮挡);`hidesOnDeactivate=false` + 监听 `didResignActive` 保活。详见 DEBUG_LOG D-006。
 16. **`AVAssetWriterInput` 没有 `sourcePixelBufferAttributes` 属性**:像素缓冲属性只在 `AVAssetWriterInputPixelBufferAdaptor` 的 init 上声明。
 17. **ObjC 异常对 Swift 不可见**:`AVCaptureSession.startRunning()` 等可能抛 Objective-C 异常,Swift `try/catch` 抓不住 → SIGABRT 杀进程。用独立 C/ObjC target(`CameraSessionBridge`)的 `@try/@catch` 接住,转成 `NSString*` 返回(含 name+reason),既防崩溃又可写日志诊断。SwiftPM 不允许同 target 混编 Swift+C,故拆成独立 `.target` + `publicHeadersPath`。
+18. **MV3 service worker 会被完全终止(非休眠)**:停止录制/popup 关闭后,SW 在空闲时被 Chrome 销毁,所有全局状态(`port=null`)丢失。下次操作若依赖 SW 已有连接,会失败(表现为「录完一条必须刷新插件」)。**修法**:SW 顶层启动即 `connect()` 预连接 + `onDisconnect` 后 300ms 主动重连。宿主侧的 EOF 退出**不是根因**(native messaging 每次连接本就新起进程),不要在宿主侧加保活。详见 DEBUG_LOG D-005。
+19. **摄像头 session 复用时 `didStartRunningNotification` 不会再发**:`AVCaptureSession` 从 stopped→running 才发该通知;若 session 已在 running(重入/上次 stop 未真正停),再调 `startRunning()` 是幂等的但不发通知 → 等通知会超时(连录失败的次生现象)。**修法**:`startRunning` 前先查 `session.isRunning`,已在跑则直接成功,不等通知。

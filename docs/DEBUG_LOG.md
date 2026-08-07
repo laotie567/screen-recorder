@@ -6,10 +6,106 @@
 
 ## 目录
 
+- [D-005 录完一条不能连录,必须刷新插件](#d-005)
+- [D-006 圆形摄像头浮窗切到其他窗口后消失](#d-006)
+- [D-007 install.sh 签名步骤触发系统钥匙串 GUI 弹窗卡死](#d-007)
 - [D-001 录屏/截图全部失效,报「用户拒绝了 TCC」](#d-001)
 - [D-002 摄像头录制报 `startRunning threw exception`](#d-002)
 - [D-003 install.sh 固定签名静默失败(从未真正成功过)](#d-003)
 - [D-004 摄像头 `startRunning` 异步竞态(中间态,被 D-002 根因取代)](#d-004)
+
+---
+
+<a id="d-005"></a>
+## D-005 录完一条不能连录,必须刷新插件(2026-08-07)
+
+### 现象
+- 停止录制后,直接点「开始录制」无法开始第二条;popup 报连接失败或超时。
+- 必须到 `chrome://extensions` **刷新扩展**后才能再录。
+- 日志里每次 stop 后都有 `stdin EOF` → 进程退出 → 下次 `host started`(新 pid)。
+
+### 关键排查命令
+```bash
+# 看宿主进程是否在 EOF 后退出(非录制态应退出,但要确认 service worker 侧重连)
+grep -E "stdin EOF|host started|start-record" ~/Library/Logs/ScreenRecordHost.log | tail -20
+
+# 确认进程当前是否存活
+ps aux | grep "[S]creenRecordHost.app/Contents/MacOS"
+```
+
+### 根因
+**与摄像头/宿主无关,是 MV3 service worker 生命周期问题。**
+- MV3 service worker 在空闲(无 popup/无网络请求)时会被 Chrome **完全终止**(不是休眠),所有全局变量(`port=null`)丢失。
+- 停止录制后 popup 关闭 → service worker 空闲 → 被终止 → 与宿主的 native messaging port 断开 → 宿主检测到 `stdin EOF` 退出进程。
+- 下次点「开始录制」:Chrome 重新唤醒 SW,但 SW 重启后 `port=null`,首个 `host-call` 才触发 `connect()` 拉起新宿主进程。这个冷启动路径在某些时序下不稳,表现为连接失败/必须刷新。
+- 注意:`main.swift` 的 EOF 立即退出**不是根因**(native messaging 每次连接本就新起进程),宿主保活无用——修在 service worker 侧。
+
+### 修复(`extension/background/service-worker.js`)
+1. **SW 启动即预连接**:顶层 `connect()`,SW 唤醒后立刻建立 port,不等首个 `host-call`。
+2. **`onDisconnect` 后 300ms 主动重连**:即使无排队请求也预连接,保持 port 热备。
+
+### 寻源关键词
+`连录失败` · `必须刷新插件` · `MV3 service worker 终止` · `stdin EOF 后退出` · `port=null 冷启动` · `connectNative 重连`
+
+---
+
+<a id="d-006"></a>
+## D-006 圆形摄像头浮窗切到其他窗口后消失(2026-08-07)
+
+### 现象
+- 录制中切到微信等窗口,摄像头圆形浮窗消失,用户以为录制中断。
+
+### 关键排查命令
+```bash
+# 确认录制是否真的断了(看 recording-stopped/failed 事件)
+grep -E "recording-stopped|recording-failed|didStopWithError" ~/Library/Logs/ScreenRecordHost.log | tail
+# 若无上述事件 = 录制仍在继续,只是浮窗不可见
+```
+
+### 根因
+**`NSPanel` 在 app 失活时的层级/可见性问题,与录制无关。**
+- `.floating` level 在其他 app 抢占前台时会被压下去。
+- `nonactivatingPanel` 在前台 app 切换时默认会 hide(即使 `hidesOnDeactivate=false`,层级不够仍会被遮)。
+
+### 修复(`host/Sources/ScreenRecordHost/CameraOverlayPanel.swift`)
+1. **level 提升到 `.statusBar`**:高于普通 floating,不易被其他 app 窗口遮挡。
+2. **保活机制**:监听 `NSApplication.didResignActiveNotification` / `NSWindow.didBecomeKeyNotification`,切到其他 app 后延迟 300ms 重新 `orderFrontRegardless`(合并连续通知防抖动)。
+3. `collectionBehavior` 加 `.stationary`。
+
+### 寻源关键词
+`浮窗切窗消失` · `NSPanel floating 被遮挡` · `nonactivatingPanel hide` · `statusBar level` ·`didResignActive 保活`
+
+---
+
+<a id="d-007"></a>
+## D-007 install.sh 签名步骤触发系统钥匙串 GUI 弹窗卡死(2026-08-07)
+
+### 现象
+- `bash installer/install.sh` 卡在第 3 步「签名」,长时间无输出、不结束。
+- `ps` 可见 `TrustedPeersHelper` + `com.apple.CodeSigningHelper` 在运行。
+- 根因:`set-key-partition-list` 或 `codesign --keychain` 触发了**系统钥匙串授权 GUI 弹窗**,在无 GUI 交互/无头环境无限等待。
+
+### 关键排查命令
+```bash
+# install.sh 跑起来后,另开终端看是否卡在 codesign
+ps aux | grep -iE "[c]odesign|TrustedPeersHelper|CodeSigningHelper"
+# 若有 = 正在等 GUI 授权确认
+
+# 搜索列表是否被污染(之前的 bug 会嵌套路径)
+security list-keychains -d user
+```
+
+### 根因
+- macOS 对频繁创建/删除临时 keychain + 使用 `set-key-partition-list` 的场景,在某些系统版本会弹出「是否允许 XXX 使用签名密钥」的 GUI 确认窗。
+- 脚本中无 `2>/dev/null` 时,`codesign` 会阻塞等待用户在 GUI 点「始终允许」。
+- 频繁调试(反复创建临时 keychain)可能让系统策略收紧,从「自动允许」变成「需确认」。
+
+### 应对
+- **临时绕过**:用 ad-hoc 签名快速构建功能测试版(`codesign --force --sign -`),不触发 keychain GUI。代价:TCC 授权不稳定(每次重装 CDHash 变)。
+- **彻底解法**(待实现):改用 login keychain + 一次性导入证书(不每次创建临时 keychain),或申请 Apple 开发者证书走正式签名。当前 DEBUG_LOG D-003 的临时 keychain 方案在多数机器有效,本机因调试频繁触发收紧。
+
+### 寻源关键词
+`install.sh 卡住签名` · `codesign 阻塞` · `TrustedPeersHelper` ·`set-key-partition-list GUI 弹窗` · `钥匙串授权确认`
 
 ---
 

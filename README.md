@@ -20,7 +20,7 @@ Chrome 扩展(MV3)+ macOS 本地宿主(Native Messaging Host)双组件方案:
 - **录屏**:主屏全屏,**60fps**,H.264+AAC,MP4 输出到 `~/Movies/ScreenRecord/`
   - 分辨率 = **主屏物理像素**(Retina 屏按像素录制,如 3456×2234,非逻辑点),码率按分辨率+帧率自适应(1080p60→18M / 2K60→24M / 4K60→36M;30fps 档 ×2/3)
   - 系统音频(扬声器声音)+ 麦克风画外音,双路混合为一条音轨
-  - **摄像头画中画(0.3.0 新增)**:popup 勾选「同时录制摄像头」后,Mac 摄像头画面以右下角画中画合成进同一个 MP4(宽 = 屏宽 1/4,720p 采集)
+  - **摄像头圆形浮窗(所见即所得)**:popup 勾选「同时录制摄像头」后,摄像头以**圆形悬浮窗**显示在屏幕上,屏幕录制自然捕获 → 拖动/滚轮缩放浮窗即调整 MP4 里摄像头的位置和大小,零延迟。浮窗切换其他窗口时保持可见。
   - 浏览器最小化/退出不影响录制;菜单栏红点可停止
 - **截图**:主屏单帧 PNG,自动打开批注编辑器
 - **批注**:画笔 / 矩形 / 箭头 / 文字 / 模糊(马赛克)/ 撤销重做 / 清空,导出 PNG 或复制剪贴板
@@ -84,8 +84,9 @@ macOS 宿主(host/,Swift)
 ├── main.swift                      NSApplication + 后台 stdin 消息循环
 ├── NativeMessaging.swift           Chrome native messaging 协议(长度前缀 JSON)
 ├── CommandHandler.swift            命令分发 + 事件推送
-├── Recorder.swift                  ScreenCaptureKit 录屏 + AVAssetWriter(+ 摄像头画中画合成)
-├── CameraCapture.swift             摄像头采集(AVCaptureSession,供画中画)
+├── Recorder.swift                  ScreenCaptureKit 录屏 + AVAssetWriter
+├── CameraOverlayPanel.swift        圆形摄像头浮窗(NSPanel,所见即所得;拖动/缩放)
+├── CameraCapture.swift             摄像头采集(AVCaptureSession,供浮窗预览)
 ├── AudioMixer.swift                系统音频+麦克风:重采样→帧对齐→混合
 ├── ScreenCaptureService.swift      主屏截图(SCScreenshotManager)
 ├── RecordingStore.swift            录制列表/Finder
