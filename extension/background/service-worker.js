@@ -50,6 +50,10 @@ function connect() {
       cur.reject(new Error(err ? err.message : "host disconnected"));
     }
     pump(); // 队列中的后续请求触发重连
+    // 即使当前无排队请求,也主动预连接一次:录制停止后 service worker 常被 Chrome
+    // 空闲终止,下次 popup 打开时若 port=null 且 SW 已销毁,会出现"必须刷新插件才能录制"。
+    // 预连接让 SW 尽早重新拉起宿主进程,保持连接热备。
+    setTimeout(() => { if (!port) connect(); }, 300);
     broadcast({ event: "host-disconnected" });
   });
   return true;
@@ -122,3 +126,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
   return false;
 });
+
+// SW 启动即预连接:MV3 service worker 在空闲时会被 Chrome 完全终止(非休眠),
+// 重启后所有全局变量(port=null)丢失。若不在启动时主动建连,直到首个 host-call 才
+// 触发 connect(),会有冷启动延迟;某些场景下 connectNative 在 SW 刚唤醒的瞬间不稳,
+// 导致 popup 报「无法连接」。启动即预连接让 port 尽早就绪。
+connect();
