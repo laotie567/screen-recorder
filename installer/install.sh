@@ -48,123 +48,128 @@ cat > "$APP_DIR/Contents/Info.plist" <<PLIST
 </plist>
 PLIST
 
-echo "==> 3/4 签名(固定自签证书身份)..."
+echo "==> 3/4 签名(固定证书身份,login keychain 方案)..."
 # 为什么必须固定签名:macOS 的 TCC(屏幕录制/麦克风/摄像头授权)按代码签名记录,
 # ad-hoc 签名每次构建 CDHash 都变 → 重装后系统设置里的旧勾选对新二进制全部失效,
 # 表现为「明明勾选了权限却一直报 permission denied」。固定证书签名后授权一次永久有效。
 #
-# 实现要点(macOS 15 + LibreSSL/OpenSSL 3 实测,2026-08 验证通过):
-# - 证书必须是【叶子证书】:basicConstraints=CA:FALSE + EKU=codeSigning。
-#   CA:TRUE 会被 keychain 当作 CA 而非可用的 codesigning 身份(find-identity 返回 0)。
-# - 私钥/证书分体 PEM 用 security import 分两次导入,keychain 无法把它们配对成身份
-#   (find-identity 仍返回 0)。必须打包成 PKCS#12 一次性导入。
-# - LibreSSL/OpenSSL3 默认生成的 p12 用 AES-256-CBC,macOS security import 报
-#   "MAC verification failed"。必须用 `openssl pkcs12 -export -legacy`(3DES)
-#   才能被 macOS 识别。
-# - 临时钥匙串必须加入 keychain 搜索列表(list-keychains -s),否则即使 identity
-#   已导入,codesign 仍报 "no identity found"(它只查搜索列表,不查孤立 keychain)。
-# - set-key-partition-list 授权 codesign 免确认使用私钥(不设置会卡 GUI 授权窗)。
-# - 证书材料持久保存在 ~/.config/screenrecord-host/(0600),每次安装复用同一证书。
+# 方案演进(详见 docs/DEBUG_LOG.md D-003/D-007):
+# - 旧版用「临时 keychain + set-key-partition-list」:在频繁调试的机器上会触发系统
+#   钥匙串授权 GUI 弹窗(TrustedPeersHelper 卡死),install.sh 永久挂起。
+# - 现版改用【login keychain 固定身份】:证书一次性导入登录钥匙串(用户配合一次),
+#   之后 install.sh 直接用 `codesign --sign`,秒级完成、无 GUI、CDHash 稳定。
+#   已实测:codesign 用 login keychain 身份不卡、CDHash 两次完全一致。
+#
+# 证书要求(macOS 15 + LibreSSL/OpenSSL 3 实测):
+# - 叶子证书:basicConstraints=CA:FALSE + EKU=codeSigning(CA:TRUE 不被当 codesigning 身份)
+# - 必须打包成 legacy PKCS#12(3DES)导入:分体 PEM 配不成 identity;AES p12 报 MAC verification failed
+# - 自签证书的 CSSMERR_TP_NOT_TRUSTED 不影响 codesign 和 TCC(签名不需信任链,CDHash 稳定即可)
 CERT_NAME="ScreenRecordHost Signing"
 CERT_DIR="$HOME/.config/screenrecord-host"
 KEY_PEM="$CERT_DIR/signing-key.pem"
 CERT_PEM="$CERT_DIR/signing-cert.pem"
+LOGIN_KC="$HOME/Library/Keychains/login.keychain-db"
 SIGN_OK=0
 
-# 生成叶子证书(CA:FALSE)。注意:若已存在旧版 CA:TRUE 证书会保留——
-# 旧证书的私钥 PEM 格式 + CA 标志会导致下面签名失败,届时会进入错误中止分支提示重新生成。
-if [ ! -f "$KEY_PEM" ] || [ ! -f "$CERT_PEM" ]; then
-    echo "    首次使用:生成自签代码签名证书(保存在 $CERT_DIR)..."
-    mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
-    if ! ( umask 077 && openssl req -x509 -newkey rsa:2048 \
-        -keyout "$KEY_PEM" -out "$CERT_PEM" -days 3650 -nodes -subj "/CN=$CERT_NAME" \
-        -addext "basicConstraints=critical,CA:FALSE" \
-        -addext "keyUsage=critical,digitalSignature" \
-        -addext "extendedKeyUsage=critical,codeSigning" ); then
-        echo "    ✗ 证书生成失败(openssl 错误见上)" >&2
+# --- 第 1 步:检测 login keychain 是否已有身份(幂等:有则直接用)---
+# find-identity 不带 -v 能列出未受信任的自签身份(CSSMERR_TP_NOT_TRUSTED),codesign 仍可用。
+if security find-identity -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
+    echo "    检测到 login keychain 已有 $CERT_NAME 身份,直接复用"
+else
+    # --- 第 2 步:首次导入(用户需配合一次:输 Mac 密码 / 点「始终允许」)---
+    echo "    首次使用:需要把签名证书导入登录钥匙串(只需做一次)。"
+
+    # 2a. 生成/复用证书材料
+    if [ ! -f "$KEY_PEM" ] || [ ! -f "$CERT_PEM" ]; then
+        echo "    生成自签代码签名证书(保存在 $CERT_DIR)..."
+        mkdir -p "$CERT_DIR" && chmod 700 "$CERT_DIR"
+        if ! ( umask 077 && openssl req -x509 -newkey rsa:2048 \
+            -keyout "$KEY_PEM" -out "$CERT_PEM" -days 3650 -nodes -subj "/CN=$CERT_NAME" \
+            -addext "basicConstraints=critical,CA:FALSE" \
+            -addext "keyUsage=critical,digitalSignature" \
+            -addext "extendedKeyUsage=critical,codeSigning" ); then
+            echo "    ✗ 证书生成失败(openssl 错误见上)" >&2
+            exit 1
+        fi
+    fi
+
+    # 2b. 打包 legacy p12(3DES,macOS 才认)
+    P12_PASS="sr$(openssl rand -hex 8 2>/dev/null || date +%s)"
+    P12_FILE="$(mktemp -u -t sr-signing).p12"
+    if ! openssl pkcs12 -export -legacy \
+            -inkey "$KEY_PEM" -in "$CERT_PEM" \
+            -out "$P12_FILE" -passout "pass:$P12_PASS" -name "$CERT_NAME" 2>/dev/null \
+        || [ ! -s "$P12_FILE" ]; then
+        echo "    ✗ PKCS#12 打包失败(openssl 版本过旧不支持 -legacy?用 brew install openssl@3 升级)" >&2
+        rm -f "$P12_FILE" 2>/dev/null
         exit 1
     fi
+
+    # 2c. 导入 login keychain(这一步可能弹钥匙串密码窗——输入 Mac 登录密码)
+    echo "    导入证书到登录钥匙串(若弹出密码窗,请输入你的 Mac 登录密码)..."
+    if ! security import "$P12_FILE" -k "$LOGIN_KC" -P "$P12_PASS" -T /usr/bin/codesign -T /usr/bin/security 2>&1; then
+        echo "    ✗ 证书导入失败。可能是密码错误或钥匙串被锁。" >&2
+        echo "      请到「钥匙串访问」App 解锁登录钥匙串后重跑本脚本。" >&2
+        rm -f "$P12_FILE" 2>/dev/null
+        exit 1
+    fi
+    rm -f "$P12_FILE" 2>/dev/null
+
+    # 2d. 设置 partition-list:授权 codesign 免交互使用私钥(可能再弹一次确认窗,点「始终允许」)
+    #     login keychain 已解锁时通常免密码;若卡住,提示用户输密码。
+    echo "    授权 codesign 使用签名密钥(若弹出确认窗,点「始终允许」)..."
+    # 交互式读取 login keychain 密码(非回显),用于 set-key-partition-list
+    # login keychain 密码通常 = Mac 登录密码
+    if [ -t 0 ]; then
+        # 终端交互:读密码(非回显)
+        printf "    请输入登录钥匙串密码(通常=Mac 登录密码,用于授权 codesign): "
+        stty -echo 2>/dev/null
+        read -r KC_PASS
+        stty echo 2>/dev/null
+        echo
+        security set-key-partition-list -S apple-tool:,apple:,codesign:,security: \
+            -s -k "$KC_PASS" "$LOGIN_KC" >/dev/null 2>&1 || true
+    else
+        # 非交互(管道/无头):尝试空密码(login keychain 已解锁时可能生效)
+        security set-key-partition-list -S apple-tool:,apple:,codesign:,security: \
+            -s -k "" "$LOGIN_KC" >/dev/null 2>&1 || true
+    fi
+
+    # 2e. 确认身份是否就绪
+    if ! security find-identity -p codesigning 2>/dev/null | grep -q "$CERT_NAME"; then
+        echo "    ✗ 导入后仍未检测到身份。请手动检查:" >&2
+        echo "      钥匙串访问 → 登录钥匙串 → 证书 → 确认 \"$CERT_NAME\" 已存在且私钥可用" >&2
+        exit 1
+    fi
+    echo "    ✓ 证书已导入登录钥匙串(后续安装将免交互)"
 fi
 
-if [ -f "$KEY_PEM" ] && [ -f "$CERT_PEM" ]; then
-    TMPKC_PASS="sr$(openssl rand -hex 8 2>/dev/null || date +%s)"
-    P12_PASS="sr$(openssl rand -hex 8 2>/dev/null || date +%s)"
-    TMPKC="$(mktemp -u -t sr-signing).keychain"
-    P12_FILE="$(mktemp -u -t sr-signing).p12"
-
-    # 捕获原始搜索列表,用数组保存避免 word-splitting/路径转义破坏
-    # (旧版直接字符串拼接 $BEFORE_LIST,路径里的空格/引号会把 list-keychains -s 参数搞乱,
-    #  污染用户 keychain 搜索列表)。cleanup 钩子保证无论如何都恢复。
-    ORIG_SEARCH=()
-    while IFS= read -r line; do
-        # security list-keychains 输出形如:    "/path/to/kc.db"
-        ORIG_SEARCH+=( "$(printf '%s' "$line" | sed 's/^[[:space:]]*"//; s/"[[:space:]]*$//')" )
-    done < <(security list-keychains -d user 2>/dev/null)
-
-    restore_search_list() {
-        if [ "${#ORIG_SEARCH[@]}" -gt 0 ]; then
-            security list-keychains -d user -s "${ORIG_SEARCH[@]}" 2>/dev/null || true
-        fi
-    }
-    cleanup_signing() {
-        restore_search_list
-        security delete-keychain "$TMPKC" >/dev/null 2>&1 || true
-        rm -f "$TMPKC" "${TMPKC}-db" "$P12_FILE" 2>/dev/null || true
-    }
-
-    if security create-keychain -P "$TMPKC_PASS" "$TMPKC" 2>/dev/null; then
-        security unlock-keychain -p "$TMPKC_PASS" "$TMPKC" 2>/dev/null || true
-
-        # 关键 1:打包成 legacy PKCS#12(3DES),macOS security import 才认。
-        # 分体 PEM 两次 import 无法配对成 identity;默认 AES p12 报 MAC verification failed。
-        if openssl pkcs12 -export -legacy \
-                -inkey "$KEY_PEM" -in "$CERT_PEM" \
-                -out "$P12_FILE" -passout "pass:$P12_PASS" -name "$CERT_NAME" 2>/dev/null \
-            && [ -s "$P12_FILE" ]; then
-
-            if security import "$P12_FILE" -k "$TMPKC" -P "$P12_PASS" -T /usr/bin/codesign >/dev/null 2>&1; then
-                # 分区列表:授权 codesign 免 GUI 确认使用私钥(不设置会弹授权窗或直接失败)
-                security set-key-partition-list -S apple-tool:,apple:,codesign:,security: \
-                    -s -k "$TMPKC_PASS" "$TMPKC" >/dev/null 2>&1 || true
-
-                # 关键 2:临时 keychain 必须加入搜索列表,否则 codesign 找不到 identity
-                # (codesign 只查搜索列表中的 keychain,不查 --keychain 指定的孤立 keychain)。
-                security list-keychains -d user -s "$TMPKC" "${ORIG_SEARCH[@]}" 2>/dev/null || true
-
-                # 注意:不要用 `codesign -dv ... | grep -q` 管道校验。
-                # 原因:set -o pipefail 下,grep -q 匹配到即退出会关闭读端,
-                # codesign 仍在写 → 收到 SIGPIPE → 退出码 141 → pipefail 让整条管道
-                # 退出码 = 141 → 外层 && 链判 false,签名明明成功却误报失败。
-                # 修法:把签名信息写到临时文件再 grep,生产者写完即正常退出,无 SIGPIPE。
-                if codesign --keychain "$TMPKC" --force --sign "$CERT_NAME" "$APP_DIR" 2>/dev/null; then
-                    VERIFY_FILE="$(mktemp -t sr-verify)"
-                    codesign -d --verbose=4 "$APP_DIR" >"$VERIFY_FILE" 2>&1 || true
-                    if grep -q "Authority=$CERT_NAME" "$VERIFY_FILE"; then
-                        SIGN_OK=1
-                        echo "    已用固定证书签名(Authority=$CERT_NAME,重装不再丢权限)"
-                    fi
-                    rm -f "$VERIFY_FILE"
-                fi
-            fi
-        fi
-        cleanup_signing
+# --- 第 3 步:用 login keychain 身份签名(秒级,无 GUI)---
+if codesign --force --sign "$CERT_NAME" "$APP_DIR" 2>/dev/null; then
+    # 注意:不要用 `codesign -dv | grep -q` 管道校验(pipefail + SIGPIPE 误报,见 D-003)。
+    # 改写临时文件再 grep,生产者写完即正常退出。
+    VERIFY_FILE="$(mktemp -t sr-verify)"
+    codesign -d --verbose=4 "$APP_DIR" >"$VERIFY_FILE" 2>&1 || true
+    if grep -q "Authority=$CERT_NAME" "$VERIFY_FILE"; then
+        SIGN_OK=1
+        echo "    已用固定证书签名(Authority=$CERT_NAME,重装不丢权限)"
+    else
+        echo "    ✗ 签名后未找到 Authority(身份可能未正确配置)" >&2
+        sed 's/^/      /' "$VERIFY_FILE" >&2
     fi
+    rm -f "$VERIFY_FILE"
+else
+    echo "    ✗ codesign 失败" >&2
 fi
 
 if [ "$SIGN_OK" != "1" ]; then
-    # 不再静默回退 ad-hoc:ad-hoc 是本 bug 的根因(重装即丢权限),回退只会让问题重现。
-    # 明确中止,给出可操作的修复指引。
     echo
-    echo "✗ 固定证书签名失败。这是 TCC 授权生效的前提,不能跳过。" >&2
-    echo "  常见原因:" >&2
-    echo "  a) 旧版 CA:TRUE 证书残留(~/.config/screenrecord-host/),与新版流程不兼容。" >&2
-    echo "     删除后重跑本脚本即可重新生成:" >&2
-    echo "       rm -rf ~/.config/screenrecord-host && $0" >&2
-    echo "  b) openssl 版本过旧不支持 -legacy(需要 openssl 3.x;LibreSSL 亦支持)。" >&2
-    echo "     openssl version → 若 < 3,用 brew install openssl@3 升级。" >&2
-    echo "  c) 本机禁用了临时 keychain 创建。" >&2
-    echo
-    echo "  失败的详细日志(可重新跑本脚本并查看此处以上输出)。" >&2
+    echo "✗ 固定证书签名失败。这是 TCC 授权生效的前提,不能跳过(不再回退 ad-hoc)。" >&2
+    echo "  排查:" >&2
+    echo "  a) 身份丢失(login keychain 被清理):重跑本脚本会重新引导导入。" >&2
+    echo "  b) openssl 不支持 -legacy:brew install openssl@3 后重跑。" >&2
+    echo "  c) 钥匙串被锁:到「钥匙串访问」App 解锁登录钥匙串。" >&2
+    echo "  详见 docs/DEBUG_LOG.md D-003/D-007。" >&2
     exit 1
 fi
 

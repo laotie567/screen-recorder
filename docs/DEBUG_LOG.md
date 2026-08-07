@@ -78,7 +78,7 @@ grep -E "recording-stopped|recording-failed|didStopWithError" ~/Library/Logs/Scr
 ---
 
 <a id="d-007"></a>
-## D-007 install.sh 签名步骤触发系统钥匙串 GUI 弹窗卡死(2026-08-07)
+## D-007 install.sh 签名步骤触发系统钥匙串 GUI 弹窗卡死(2026-08-07,已解决)
 
 ### 现象
 - `bash installer/install.sh` 卡在第 3 步「签名」,长时间无输出、不结束。
@@ -100,12 +100,16 @@ security list-keychains -d user
 - 脚本中无 `2>/dev/null` 时,`codesign` 会阻塞等待用户在 GUI 点「始终允许」。
 - 频繁调试(反复创建临时 keychain)可能让系统策略收紧,从「自动允许」变成「需确认」。
 
-### 应对
-- **临时绕过**:用 ad-hoc 签名快速构建功能测试版(`codesign --force --sign -`),不触发 keychain GUI。代价:TCC 授权不稳定(每次重装 CDHash 变)。
-- **彻底解法**(待实现):改用 login keychain + 一次性导入证书(不每次创建临时 keychain),或申请 Apple 开发者证书走正式签名。当前 DEBUG_LOG D-003 的临时 keychain 方案在多数机器有效,本机因调试频繁触发收紧。
+### 修复(已落地)
+**改用 login keychain 固定身份方案,彻底去掉临时 keychain:**
+- 证书**一次性导入登录钥匙串**(用户配合一次:输 Mac 密码 / 点「始终允许」)。
+- 之后 install.sh 直接 `codesign --sign "ScreenRecordHost Signing"`(从 login keychain 取身份),**秒级完成、无 GUI 弹窗、无 set-key-partition-list**。
+- install.sh 幂等:检测到 login keychain 已有身份则直接复用,跳过导入。
+- 实测:两次重装 CDHash 完全一致(`c97dcab1...`),5.8 秒完成全流程。
+- 关键认知:自签证书的 `CSSMERR_TP_NOT_TRUSTED`(未受系统信任)**不影响 codesign 和 TCC**——签名不需要信任链,CDHash 稳定即可。
 
 ### 寻源关键词
-`install.sh 卡住签名` · `codesign 阻塞` · `TrustedPeersHelper` ·`set-key-partition-list GUI 弹窗` · `钥匙串授权确认`
+`install.sh 卡住签名` · `codesign 阻塞` · `TrustedPeersHelper` ·`set-key-partition-list GUI 弹窗` · `钥匙串授权确认` · `login keychain 固定身份`
 
 ---
 
