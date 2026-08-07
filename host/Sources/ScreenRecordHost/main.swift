@@ -53,6 +53,7 @@ DispatchQueue.global(qos: .userInitiated).async {
     HostLog.write("stdin EOF (Chrome disconnected)")
     // stdin EOF(Chrome 断开)。非录制时立即退出;录制中保持到录制结束再退出,
     // 避免 Chrome 重连时拉起第二个宿主实例(双菜单栏图标)。
+    // 连录的稳定性由 service worker 的重连逻辑保证(见 service-worker.js onDisconnect)。
     let terminate = {
         DispatchQueue.main.async { NSApp.terminate(nil) }
     }

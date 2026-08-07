@@ -25,7 +25,10 @@ final class CameraCapture: NSObject {
 
     static let shared = CameraCapture()
 
-    private let session = AVCaptureSession()
+    /// 摄像头采集 session。浮窗预览层(CameraOverlayPanel)共享此 session:
+    /// AVCaptureVideoPreviewLayer 与 videoOutput 共存于同一 session 合法(Appple 官方推荐)。
+    /// 预览层负责「给人看」,videoOutput 保留供未来取帧需求(本次不再用于合成)。
+    private(set) var session = AVCaptureSession()
     private let videoOutput = AVCaptureVideoDataOutput()
     /// session 配置与启停均在专用串行队列(startRunning 是阻塞调用)
     private let sessionQueue = DispatchQueue(label: "com.screenrecord.camera.session")
@@ -106,6 +109,15 @@ final class CameraCapture: NSObject {
 
             // 配置成功:提交后再启动(startRunning 必须在 commitConfiguration 之后)
             session.commitConfiguration()
+
+            // 若 session 已处于 running(上次 stop 未真正停掉、或重入),startRunning() 是幂等的、
+            // 但不会再次发 didStartRunningNotification → 等通知会误判超时(连录失败的根因)。
+            // 故先查 isRunning:已在跑则直接成功,既不重复 startRunning 也不等通知。
+            if session.isRunning {
+                HostLog.write("camera: session already running (reuse, skip startRunning)")
+                isRunning = true
+                return
+            }
 
             // startRunning 是耗时操作:同步调用返回后硬件仍在后台初始化,
             // 此时 session.isRunning 往往还是 false。用通知等 didStartRunning 判定真正就绪。
