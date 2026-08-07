@@ -4,6 +4,40 @@
 
 ## 1. 权限类
 
+### 1.0 明明在系统设置里勾选了权限,却一直报 "permission denied"(最高发)
+
+**原因**:macOS 的 TCC 按**代码签名**记录授权,系统设置列表按 bundle ID 显示。
+旧版本宿主是 ad-hoc 签名,每次重装 CDHash 都变 → 列表里那条「已勾选」绑定的是**已失效的旧签名**,
+对当前二进制永远无效,形成「幽灵授权」。0.3.0 起 install.sh 已改用固定自签证书签名(根治)。
+
+**解决**(一次性):
+```bash
+# 1. 清除绑定旧签名的残留授权记录
+tccutil reset ScreenCapture com.screenrecord.host
+tccutil reset Microphone com.screenrecord.host
+tccutil reset Camera com.screenrecord.host
+# 2. 重新安装(0.3.0+,固定证书签名,授权一次永久有效)
+bash installer/install.sh
+# 3. 按安装输出的指引重新勾选 屏幕录制/麦克风/(可选)摄像头
+```
+之后在 chrome://extensions 刷新扩展即可。
+
+**验证授权是否真实生效**(不依赖系统设置的勾选显示):
+```bash
+python3 - <<'EOF'
+import json, struct, subprocess, os
+env = dict(os.environ, SCREENRECORDHOST_NO_APPKIT="1")
+p = subprocess.Popen([os.path.expanduser("~/Applications/ScreenRecordHost.app/Contents/MacOS/ScreenRecordHost")],
+                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, env=env)
+d = json.dumps({"cmd": "check-permission"}).encode()
+p.stdin.write(struct.pack("<I", len(d)) + d); p.stdin.flush()
+n = struct.unpack("<I", p.stdout.read(4))[0]
+print(p.stdout.read(n).decode())
+p.terminate()
+EOF
+# {"screenRecording": true, "microphone": true, "camera": ...} 才算真的生效
+```
+
 ### 1.1 「屏幕录制」列表里找不到 ScreenRecordHost
 
 **原因**:macOS 的 TCC 列表只显示「曾经请求过权限」的应用;首次请求弹窗未成功时,列表为空,需要手动添加。
@@ -15,7 +49,7 @@
    /Users/<你的用户名>/Applications/ScreenRecordHost.app
    ```
 3. 回车 → 「打开」→ 勾选 ScreenRecordHost
-4. 「麦克风」同样操作
+4. 「麦克风」同样操作;使用「同时录制摄像头」功能还需在「摄像头」中同样勾选
 5. **重启宿主**:菜单栏图标 → 退出(或扩展里重新点「开始录制」自动拉起)
 
 **提示**:宿主装在用户级 `~/Applications`,Finder 侧边栏不显示;用「前往 → 前往文件夹」输入路径查看。
@@ -28,9 +62,32 @@
 
 ### 1.3 重装/升级后权限又没了
 
-**原因**:ad-hoc 签名每次生成新的 CDHash,TCC 授权按签名记录,重装即失效。
+**原因**:旧版本用 ad-hoc 签名,每次生成新的 CDHash,TCC 授权按签名记录,重装即失效。
+**0.3.0 起已改用固定自签证书(授权一次永久有效)**,正常升级不会再丢权限;若仍异常,先 `tccutil reset` 三类再授权一次(见 1.0)。
 
-**解决**:按 1.1 重新添加(装完 `install.sh` 后列表里通常已有旧记录,重新勾选或删除重加)。
+### 1.4 勾选「同时录制摄像头」后点开始录制失败 / 宿主崩溃
+
+**现象**:popup 勾选了「同时录制摄像头」,点开始录制后报 camera 相关错误,或宿主直接退出。
+
+**原因与解决**:
+- **报 `camera permission denied`**:0.3.0 新增的摄像头画中画需要**单独授权**。去
+  `系统设置 → 隐私与安全性 → 摄像头` 勾选 `ScreenRecordHost`,再点一次「开始录制」。
+  (不勾选该开关则只录屏幕,无需摄像头权限。)
+- **宿主崩溃(SIGABRT)**:旧代码在摄像头设备被占用/权限异常时,`AVCaptureSession.startRunning()`
+  会抛出 **Objective-C 异常**,而 Swift 的 `try/catch` 抓不住 ObjC 异常 → 整个进程被杀。
+  **0.3.1 起用 C 桥接器(`CameraSessionBridge`)接住该异常并转为清晰的 Swift 错误**,
+  宿主不再崩溃,popup 会显示具体原因(如「摄像头被其他程序占用」)。
+- **摄像头被 FaceTime / Photo Booth / 其他会议软件占用**:关闭占用程序后重试。
+- **报 `startRunning exception: NSGenericException: startRunning may not be called between beginConfiguration and commitConfiguration`**:
+  `CameraCapture.start()` 曾用 `defer { commitConfiguration() }`,导致 `startRunning()` 落在
+  `beginConfiguration/commitConfiguration` 事务内(AVFoundation 硬性禁止)。**已修复**:拆成
+  配置阶段(显式 commit)与启动阶段(commit 之后才 startRunning)两步。详见 [docs/DEBUG_LOG.md D-002](DEBUG_LOG.md#d-002)。
+- **报 `camera start failed: cannot add output`**(旧版残留):首次启动失败后 session 上的
+  input/output 未回滚,授权后重试时 `canAddOutput` 返回 false。**已在 `start()` 开头清理残留 +
+  失败分支回滚**;临时绕过:菜单栏 → 退出宿主 → 再点一次「开始录制」。
+
+> 排查摄像头链路可看宿主日志:`~/Library/Logs/ScreenRecordHost.log`
+> (启动/权限/编码失败都会写这里,Chrome 拉起宿主后 stderr 不可见,故用此日志)。
 
 ## 2. 连接类
 

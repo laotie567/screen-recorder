@@ -51,14 +51,18 @@ macOS 宿主(host/,Swift,无窗口菜单栏 app)
 ├── NativeMessaging.swift           协议:4 字节小端长度前缀 + UTF-8 JSON;1MB 上限 guard
 ├── CommandHandler.swift            命令分发 + 事件推送(NotificationCenter → native messaging)
 ├── Recorder.swift                  录屏核心
-│   ├── start():TCC 弹窗触发(AVCaptureScreenInput)→ 麦克风授权 → SCShareableContent → SCStream
+│   ├── start(camera:):TCC 弹窗触发(AVCaptureScreenInput)→ 麦克风授权 →(可选)摄像头授权+启动 → SCShareableContent → SCStream
 │   ├── AVAssetWriter:H.264 + AAC,60fps,物理像素分辨率,码率按分辨率+帧率自适应
+│   ├── 摄像头画中画:CIContext 合成(屏幕全帧 + 摄像头右下 1/4 宽叠加)→ AVAssetWriterInputPixelBufferAdaptor 写入;关闭时保持 sampleBuffer 直写零拷贝路径
 │   ├── stop():stopCapture → finishWriting(完成才推送 recording-stopped)
 │   ├── failWriter():writer 进入 failed(磁盘满等)主动停流推送事件
+│   ├── stopCameraIfNeeded():开始失败/停止/异常的所有出口统一回收摄像头
 │   └── stateLock:状态字段跨线程收敛(锁外通知防死锁)
+├── CameraCapture.swift             摄像头采集(AVCaptureSession,720p BGRA,只保留最新帧)
 ├── AudioMixer.swift                系统音频 + 麦克风混合
 │   ├── AVAudioConverter:统一转 48kHz/2ch/Float32(44.1k→48k 重采样)
 │   ├── 帧号对齐(pts.seconds × 48000)逐帧相加,clamp 防削波
+│   ├── 单路全消费后自动按新时间戳重置对齐基准(防音画漂移)
 │   ├── 单路积压上限 5s(另一路无待消费数据时丢最老)
 │   └── bufferList defer 释放(noCopy 引用生命周期)
 ├── ScreenCaptureService.swift      主屏截图(SCScreenshotManager)→ PNG 0600
@@ -67,7 +71,7 @@ macOS 宿主(host/,Swift,无窗口菜单栏 app)
 └── AppInfo.swift                   版本/输出目录/数据目录
 
 installer/
-├── install.sh                      构建 → 打包 app → ad-hoc 签名 → 注册 manifest → 提示
+├── install.sh                      构建 → 打包 app → 固定自签证书签名(legacy p12 + 临时钥匙串加入搜索列表,失败明确中止)→ 注册 manifest
 ├── generate_key.py                 生成扩展固定 key(私钥不入库)
 └── verify_key.py                   校验 manifest 公钥 ↔ EXTENSION_ID(已接入 make test)
 ```
@@ -82,13 +86,14 @@ installer/
 | cmd | 参数 | 响应 | 说明 |
 |---|---|---|---|
 | `ping` | - | `{ok, version, pid}` | 存活检查 |
-| `start-record` | - | `{ok}` / `{ok:false, error}` | 异步;可能触发 TCC 授权弹窗(最长 15s) |
+| `start-record` | `{camera?}` | `{ok, camera}` / `{ok:false, error}` | 异步;可能触发 TCC 授权弹窗(最长 15s);camera=true 合成摄像头画中画 |
 | `stop-record` | - | `{ok, file, duration}` | 落盘确认以 `recording-stopped` 事件为准 |
-| `status` | - | `{ok, recording, recordingSince, outputDir}` | 状态快照(线程安全) |
+| `status` | - | `{ok, recording, camera, recordingSince, outputDir}` | 状态快照(线程安全);camera=录制中且摄像头激活 |
 | `capture-screen` | - | `{ok, path}` | 主屏 PNG → 中转目录 |
 | `list-recordings` | - | `{ok, items:[{file,path,size,modified}]}` | 按时间倒序 |
 | `reveal-in-finder` | `{path}` | `{ok}` | 仅限宿主目录白名单 |
 | `read-file` | `{path, offset, size≤750000}` | `{ok, data(base64), eof}` | 分块读截图;路径白名单 + symlink 解析 |
+| `check-permission` | - | `{ok, screenRecording, microphone, camera}` | 权限真实状态(排查用) |
 | `test-mixer` | - | `{ok}` / `{ok:false,error}` | 音频混合自测(无需屏幕权限) |
 | `quit` | - | `{ok}` | 退出宿主 |
 
@@ -96,7 +101,7 @@ installer/
 
 | event | 载荷 | 时机 |
 |---|---|---|
-| `recording-started` | `{file}` | startCapture 成功后 |
+| `recording-started` | `{file, camera}` | startCapture 成功后 |
 | `recording-stopped` | `{file, duration}` | **finishWriting 完成后**(落盘保证) |
 | `recording-failed` | `{error, file?}` | writer 失败/意外停止/权限拒绝后 |
 | `host-disconnected` | - | 端口断开(service worker 广播) |
@@ -161,7 +166,9 @@ git worktree remove <repo>-dev && git branch -d dev
 
 ## 常见开发坑
 
-1. **TCC 弹窗不会自动出现**:只有真正调用录制 API 才弹窗。`CGPreflightScreenCaptureAccess()` 仅查询;`CGWindowListCreateImage` 在 macOS 15 起 unavailable;用 `AVCaptureScreenInput` 触发。授权后通常需重启进程生效。
+> 签名/TCC/摄像头等**非显而易见的故障排查**记录在 [docs/DEBUG_LOG.md](DEBUG_LOG.md)(问题→根因→解法→寻源关键词),遇到疑难先查那里。下面是开发时高频踩的坑速查。
+
+1. **TCC 弹窗不会自动出现**:只有真正调用录制 API 才弹窗。`CGPreflightScreenCaptureAccess()` 仅查询;`CGWindowListCreateImage` 在 macOS 15 起 unavailable;用 `SCShareableContent.excludingDesktopWindows` 触发(首次未授权时该调用本身会弹系统 TCC 授权窗,官方路径)。授权后通常需重启进程生效。详见 DEBUG_LOG D-001。
 2. **`AVAudioConverterOutputStatus` 语义**:有效输出常以 `.inputRanDry`(rawValue 1)结束而非 `.haveData`(0);只判断 `.haveData` 会丢数据。
 3. **`CMAudioSampleBufferCreate*WithPacketDescriptions` 对线性 PCM**:packetDescriptions 传 NULL(每包固定大小);传单包描述会被按 numSamples 个包读取 → 越界。
 4. **SCStreamOutputType 新 SDK 有 `.microphone`**:switch 必须穷尽。
@@ -169,5 +176,16 @@ git worktree remove <repo>-dev && git branch -d dev
 6. **native messaging 单条 1MB 上限**:read-file 块大小 750KB(base64 放大 4/3 后 <1MB)。
 7. **状态跨线程**:Recorder 状态字段必须经 `stateLock`(withState),`notifyStatus` 锁外调用,否则订阅者回读快照会死锁。
 8. **旧端口回调**:service worker 超时 disconnect 后,旧端口 onMessage/onDisconnect 可能迟到,用 `if (port !== p) return` 身份校验。
-9. **升级重装**:ad-hoc 签名 CDHash 变化 → TCC 授权失效,需重新授权;安装脚本会先杀旧实例。
-10. **`pgrep -F` 是 pidfile 语义**(不是固定字符串匹配),匹配进程用 `pgrep -f -x`。
+9. **ad-hoc 签名的致命陷阱**:ad-hoc 每次构建 CDHash 都变 → TCC 授权按 CDHash 记录 → 重装后系统设置里的旧勾选对新二进制全部失效,表现「明明勾选了却报 permission denied」。**install.sh 已用固定证书签名(授权一次永久有效)**;若发现签名是 ad-hoc(`codesign -dv | grep -i authority` 无输出),见 DEBUG_LOG D-001/D-003 排查。
+10. **`pgrep -F` 是 pidfile 语义**(不是固定字符串匹配),匹配进程用 `pgrep -f -x`。注意:Chrome 拉起的宿主命令行带扩展参数(`...ScreenRecordHost chrome-extension://...`),`-x` 精确匹配整行会漏;用 `pkill -f "ScreenRecordHost.app/Contents/MacOS/ScreenRecordHost"` 子串匹配更稳。
+11. **macOS 代码签名身份的建立**(实测于 macOS 15 + LibreSSL,详见 DEBUG_LOG D-003):
+    - 私钥裸 PEM(`-----BEGIN PRIVATE KEY-----`)用 `security import -f pemseq` 会报 `Unknown format in import`;**必须打包成 PKCS#12 一次性导入**才能在 keychain 里配对成 identity。
+    - OpenSSL3/LibreSSL 默认生成的 p12 用 AES,`security import` 报 `MAC verification failed`;**必须 `openssl pkcs12 -export -legacy`**(3DES)。
+    - 自签证书要做 codesigning 身份,**必须 `CA:FALSE` 叶子证书** + `codeSigning` EKU(`CA:TRUE` 会被当作 CA,`find-identity -p codesigning` 返回 0)。
+    - 临时钥匙串**必须加入搜索列表**(`security list-keychains -d user -s "$TMPKC" ...`),否则即便 identity 已导入,codesign 仍报 `no identity found`(它只查搜索列表)。
+12. **`set -o pipefail` + `grep -q` 的 SIGPIPE 陷阱**:`cmd | grep -q` 中 grep 匹配后退出关闭管道,生产者仍在写 → SIGPIPE → 退出码 141 → pipefail 让整条 `&&` 链判 false。**修法**:先写到临时文件再 `grep`,或 `set +o pipefail` 局部关闭。详见 DEBUG_LOG D-003。
+13. **免交互 codesign 的标准姿势**:随机密码临时钥匙串 → 导入 legacy p12 → `security set-key-partition-list -S apple-tool:,apple:,codesign:,security: -s -k <密码>` → 加入搜索列表 → `codesign --keychain <临时钥匙串> --sign`。完成后用数组保存的原始搜索列表恢复(字符串拼接会因路径转义污染用户 keychain 搜索列表)。直接导入登录钥匙串再签名会卡授权弹窗(密码不可知,无法 set-key-partition-list)。
+14. **摄像头 `startRunning` 不能在 configuration block 内调用**:`AVCaptureSession` 在 `beginConfiguration()/commitConfiguration()` 之间调 `startRunning` 会抛 `NSGenericException`。**必须先 `commitConfiguration()` 再 `startRunning()`**。用 `defer { commitConfiguration() }` 会在 startRunning 之后才 commit,正好踩雷——用显式 `do/catch` + 显式 commit。详见 DEBUG_LOG D-002。
+15. **摄像头画中画合成方向**:CI 坐标系原点在左下,PiP「右下角」= translation(x: 宽-图宽-边距, y: 边距);`CIImage(cvPixelBuffer:)` 渲染回同尺寸 buffer 方向自洽,已用合成 PNG 离线验证(屏幕左上标记不翻转、摄像头块在右下)。
+16. **`AVAssetWriterInput` 没有 `sourcePixelBufferAttributes` 属性**:像素缓冲属性只在 `AVAssetWriterInputPixelBufferAdaptor` 的 init 上声明。
+17. **ObjC 异常对 Swift 不可见**:`AVCaptureSession.startRunning()` 等可能抛 Objective-C 异常,Swift `try/catch` 抓不住 → SIGABRT 杀进程。用独立 C/ObjC target(`CameraSessionBridge`)的 `@try/@catch` 接住,转成 `NSString*` 返回(含 name+reason),既防崩溃又可写日志诊断。SwiftPM 不允许同 target 混编 Swift+C,故拆成独立 `.target` + `publicHeadersPath`。

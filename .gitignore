@@ -10,4 +10,6 @@ installer/extension-key.pub.pem
 
 # 会话/环境元数据(非项目代码)
 .reasonix/
+.zcode/
+.workbuddy/
 update-mattpocock-skills.sh
