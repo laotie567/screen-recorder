@@ -62,9 +62,15 @@ enum ScreenCaptureService {
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
         let config = SCStreamConfiguration()
-        // 与录屏一致:用物理像素,避免 Retina 屏截图模糊(逻辑点只有 1/4 面积)
-        config.width = Int(CGDisplayPixelsWide(display.displayID))
-        config.height = Int(CGDisplayPixelsHigh(display.displayID))
+        // 与录屏一致:用物理像素,避免 Retina 屏截图模糊(逻辑点只有 1/4 面积)。
+        // ⚠️ CGDisplayPixelsWide/High 在 Retina 屏返回逻辑点,必须用 CGDisplayMode.pixelWidth/Height。
+        if let mode = CGDisplayCopyDisplayMode(display.displayID) {
+            config.width = Int(mode.pixelWidth)
+            config.height = Int(mode.pixelHeight)
+        } else {
+            config.width = Int(CGDisplayPixelsWide(display.displayID))
+            config.height = Int(CGDisplayPixelsHigh(display.displayID))
+        }
 
         // captureImage 的 completion 在权限异常时可能不回调(SCK 已知怪癖),
         // 用信号量 + 超时保护,避免宿主无限挂起

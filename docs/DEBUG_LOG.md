@@ -21,8 +21,12 @@
 ### 连接 / 生命周期类(「必须刷新插件才能再录」)
 - **D-005** [根因] MV3 service worker 被终止 → SW 启动即预连接 + 断开后主动重连
 
+### 画质类(「录制不清晰」「分辨率低」「模糊」)
+- **D-008** [根因] 录制分辨率只有物理像素 1/4 → `CGDisplayPixelsWide` 返回逻辑点,改用 `CGDisplayMode.pixelWidth`
+
 ## 目录(时间倒序)
 
+- [D-008 录制分辨率只有物理像素 1/4,清晰度严重不足](#d-008)
 - [D-005 录完一条不能连录,必须刷新插件](#d-005)
 - [D-006 圆形摄像头浮窗切到其他窗口后消失](#d-006)
 - [D-007 install.sh 签名步骤触发系统钥匙串 GUI 弹窗卡死](#d-007)
@@ -30,6 +34,50 @@
 - [D-002 摄像头录制报 `startRunning threw exception`](#d-002)
 - [D-003 install.sh 固定签名静默失败(从未真正成功过)](#d-003)
 - [D-004 摄像头 `startRunning` 异步竞态(中间态,被 D-002 根因取代)](#d-004)
+
+---
+
+<a id="d-008"></a>
+## D-008 录制分辨率只有物理像素 1/4,清晰度严重不足(2026-08-08)
+
+### 现象
+- 录出的 MP4 明显模糊,文字/细节看不清。
+- 实测:本机屏幕 3024×1964(Liquid Retina XDR),但录出 **1512×982**(只有 1/4 面积)。
+
+### 关键排查命令
+```bash
+# 1. 查本机屏幕物理像素 vs 代码当前用的 API
+swift -e 'import CoreGraphics; let m=CGMainDisplayID(); print("CGDisplayPixelsWide:", CGDisplayPixelsWide(m)); if let mode=CGDisplayCopyDisplayMode(m) { print("mode.pixelWidth:", mode.pixelWidth) }'
+
+# 2. 查实测录制参数
+ffprobe -v error -select_streams v:0 -show_entries stream=width,height,r_frame_rate,bit_rate -of default=noprint_wrappers=1 ~/Movies/ScreenRecord/录屏-*.mp4 | head -1
+```
+
+### 根因
+**`CGDisplayPixelsWide/High` 在 Retina 屏返回的是逻辑点(points),不是物理像素(pixels)。**
+- 代码注释原本就写了"必须用物理像素,逻辑点只有 1/4 面积会模糊"——但用的 API 恰好返回逻辑点,自相矛盾。
+- 实测:`CGDisplayPixelsWide` → 1512(逻辑点);`CGDisplayMode.pixelWidth` → 3024(物理像素)。
+- 正确 API:`CGDisplayCopyDisplayMode(displayID).pixelWidth/pixelHeight`。
+
+### 修复(`host/Sources/ScreenRecordHost/Recorder.swift` + `ScreenCaptureService.swift`)
+- 分辨率获取从 `CGDisplayPixelsWide/High` 改为 `CGDisplayCopyDisplayMode().pixelWidth/Height`。
+- 兜底:取不到 mode 时退回旧 API(不致录制失败,清晰度降级)。
+- 截图功能(`ScreenCaptureService`)同步修复(同样的错误 API)。
+
+### 关于帧率(无需处理)
+- ProMotion 屏上 SCK 交付的帧率可能标称 120fps(`r_frame_rate`),但实际平均 30-60fps(VFR 可变帧率,屏幕静止时降帧省电)。
+- 这是 SCK 的正常行为,不是 bug。曾尝试 PTS 节流强制 60fps,但实测会把帧率砍更低(30fps→更低),已移除节流逻辑。
+- 屏幕录制 30-60fps 完全够用(主流平台 YouTube/B 站都是 30fps)。
+
+### 验证
+```
+修复前:1512×982, 4.95 Mbps
+修复后:3024×1964, ~10-16 Mbps(4K@60 档码率)
+```
+清晰度提升 4 倍(1/4 物理像素 → 完整物理像素)。
+
+### 寻源关键词
+`录制模糊` · `分辨率低` · `1512 而非 3024` · `CGDisplayPixelsWide 返回逻辑点` · `Retina 物理像素` · `CGDisplayMode pixelWidth` · `清晰度不足`
 
 ---
 

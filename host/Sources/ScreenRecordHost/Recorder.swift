@@ -190,11 +190,21 @@ final class Recorder: NSObject {
             throw RecorderError.setupFailed("no display found")
         }
 
-        // 输出分辨率必须用物理像素,而不是逻辑点(width/height):
-        // Retina 屏逻辑 1728×1117 的物理像素是 3456×2234,用逻辑点录制只有 1/4 面积,视频会模糊
-        // SCDisplay 无 pixel 属性,用 CGDisplayPixelsWide/High 按 displayID 取物理像素(未废弃 API)
-        let pixelWidth = Int(CGDisplayPixelsWide(display.displayID))
-        let pixelHeight = Int(CGDisplayPixelsHigh(display.displayID))
+        // 输出分辨率必须用物理像素,而不是逻辑点。
+        // ⚠️ 不要用 CGDisplayPixelsWide/High:在 Retina 屏上它们返回的是【逻辑点】(如 1512),
+        //    不是物理像素(3024)→ 录制只有 1/4 面积,清晰度严重不足(实测 1512×982 而非 3024×1964)。
+        // 正确做法:CGDisplayCopyDisplayMode().pixelWidth/Height 返回真实物理像素。
+        //    (SCDisplay 无 pixel 属性,需经 displayID 取 CGDisplayMode。)
+        let pixelWidth: Int
+        let pixelHeight: Int
+        if let mode = CGDisplayCopyDisplayMode(display.displayID) {
+            pixelWidth = Int(mode.pixelWidth)
+            pixelHeight = Int(mode.pixelHeight)
+        } else {
+            // 兜底:极端情况下取不到 mode 时退回逻辑点(清晰度降级,但不致录制失败)
+            pixelWidth = Int(CGDisplayPixelsWide(display.displayID))
+            pixelHeight = Int(CGDisplayPixelsHigh(display.displayID))
+        }
         let frameRate = 60 // 60fps(剪映等剪辑软件原生支持;码率已按 60fps 提高 50%)
 
         let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -459,6 +469,9 @@ extension Recorder: SCStreamOutput {
         case .screen:
             // 摄像头以原生悬浮窗显示(所见即所得),屏幕帧 sampleBuffer 直写零拷贝。
             // 不再 CIContext 合成,故无 camera 分支。
+            // 帧率:SCK 按 minimumFrameInterval(1/60s)交付,内容静止时自动降帧(省电),
+            // 这是正常行为(VFR 可变帧率)。不做 PTS 节流——实测节流会把 ~30fps 进一步砍低。
+            // 容器标称帧率由 AVAssetWriter 的 AVVideoExpectedSourceFrameRateKey 声明。
             let videoInput = withState { self.videoInput }
             guard let videoInput, videoInput.isReadyForMoreMediaData else { return }
             videoInput.append(sampleBuffer)
