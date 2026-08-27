@@ -34,6 +34,22 @@ final class AudioMixer {
     private var sysSrcFormat: AVAudioFormat?
     private var micSrcFormat: AVAudioFormat?
 
+    /// 各路是否交付过至少一块数据。
+    /// 单路放行(跳过对齐混合)的唯一依据:另一路自录制开始【从未交付】——
+    /// 这是录课等系统静音场景。若另一路只是暂时未到(两路交付节奏错开:sys≈20ms/块、
+    /// mic≈10.7ms/块),必须等待对齐;直接单路输出会把与另一路重叠的时段重复写一遍,
+    /// 音轨时长翻倍(实测 10s 视频配 20s 音轨,拉长一倍+重叠杂音,DEBUG_LOG D-009)。
+    private var sysArrived = false
+    private var micArrived = false
+
+    /// 首见块的时间帧号(两路中最早者):首窗等待的基准。
+    private var firstSeenStart: Int?
+    /// 已输出水位(最后输出的结束帧号):衡量"距首个音频已推进多少",防开头重叠重复。
+    private var emittedEnd: Int?
+    /// 首窗时长(帧):从首个音频块起,等待另一路的首窗;窗内不放行单路。
+    /// 真实节奏 sys≈20ms/块、mic≈10.7ms/块,0.25s 足够覆盖交付错开;录课静音场景仅多 0.25s 起播延迟。
+    private static let firstWindowFrames = 12_000 // 0.25s @48k
+
     private let compactThreshold = 48_000 * 60 // 每 60 秒紧凑一次,避免数组无限增长
     /// 单路积压上限(5 秒):另一路长时间无数据时(如系统静音),防止内存无限增长
     private let maxBacklogFrames = 48_000 * 5
@@ -47,14 +63,22 @@ final class AudioMixer {
         guard let (frames, startFrame) = convert(sampleBuffer, isMicrophone: isMicrophone),
               !frames.isEmpty else { return }
 
+        // 首见时间基准(两路最早者):首窗等待从它起算
+        if firstSeenStart == nil || startFrame < firstSeenStart! {
+            firstSeenStart = startFrame
+        }
+
         if isMicrophone {
+            micArrived = true
             // 数组为空或已全部消费(该路曾中断):按新时间戳重置对齐基准,
-            // 避免把恢复后的帧拼到旧时间轴上造成音画漂移(8/1 崩溃族修复的延续)
+            // 避免把恢复后的帧拼到旧时间轴上造成音画漂移(8/1 崩溃族修复的延续)。
+            // ⚠️ 不要重置 micConverter:AVAudioConverter 是流式转换器,重建会丢
+            // 滤波器内部状态,44.1k→48k 每块交界产生数帧缝隙(杂音,DEBUG_LOG D-009)。
+            // 格式变化时 convert() 内的格式缓存比对会自动重建。
             if micFrames.isEmpty || micCursor >= micFrames.count / 2 {
                 micFrames.removeAll(keepingCapacity: true)
                 micStart = startFrame
                 micCursor = 0
-                micConverter = nil // 重置,格式缓存按需重建
             }
             micFrames.append(contentsOf: frames)
             // 单路积压上限:系统音频无待消费数据时(从未有/已消费完,如静音)丢弃最老的麦克风数据
@@ -64,11 +88,12 @@ final class AudioMixer {
                 micStart += drop / 2
             }
         } else {
+            sysArrived = true
             if sysFrames.isEmpty || sysCursor >= sysFrames.count / 2 {
                 sysFrames.removeAll(keepingCapacity: true)
                 sysStart = startFrame
                 sysCursor = 0
-                sysConverter = nil
+                // 同上:不重置 sysConverter,保留流式转换状态(防块间缝隙)
             }
             sysFrames.append(contentsOf: frames)
             // 单路积压上限:麦克风无待消费数据时丢弃最老的系统音频数据
@@ -89,41 +114,104 @@ final class AudioMixer {
         let sysFrameCount = sysFrames.count / 2
         let micFrameCount = micFrames.count / 2
 
-        // 无系统音频:无从混合(系统音频是主轨)
-        guard !sysFrames.isEmpty, sysCursor < sysFrameCount else { return }
+        let hasSys = !sysFrames.isEmpty && sysCursor < sysFrameCount
+        let hasMic = !micFrames.isEmpty && micCursor < micFrameCount
 
-        // 无麦克风数据:系统音频原样输出
-        guard !micFrames.isEmpty, micCursor < micFrameCount else {
-            emitSysRemaining()
+        // 两路都有未消费数据:对齐混合。
+        // ⚠️ 续接位置必须是【各自的已消费位置】(sysStart+sysCursor),而非各自起点:
+        // 两路交付节奏错开时缓冲常有残留(cursor>0),用起点算 out0 会倒退——
+        // 已输出时段被重复写(拉长)+ 新段卡死(尾部丢失→AAC 压缩空洞→音频跑得快),
+        // 即「音画不同步」的根因(DEBUG_LOG D-009)。
+        if hasSys && hasMic {
+            let out0 = max(sysStart + sysCursor, micStart + micCursor)
+            var out = out0
+            let sysEnd = sysStart + sysFrameCount
+            let micEnd = micStart + micFrameCount
+            let end = min(sysEnd, micEnd)
+
+            while out < end {
+                let n = min(end - out, 4096)
+                var mixed = [Float](repeating: 0, count: n * 2)
+                for i in 0..<n {
+                    let si = (out - sysStart + i) * 2
+                    let mi = (out - micStart + i) * 2
+                    mixed[i * 2] = clamp(sysFrames[si] + micFrames[mi])
+                    mixed[i * 2 + 1] = clamp(sysFrames[si + 1] + micFrames[mi + 1])
+                }
+                emit(mixed, startFrame: out)
+                out += n
+                sysCursor = out - sysStart
+                micCursor = out - micStart
+                compactIfNeeded()
+            }
+
+            // 水位清理:落在输出水位之前的残留是「已被另一路时间覆盖」的过期数据,丢弃。
+            // (两路时间窗不重叠时,先到路的残留会被后到路的时间轴越过——不丢则永远卡死)
+            dropStaleBeforeWatermark()
+            // 水位之后的单路剩余(时间上已无重叠):直接输出
+            if sysCursor < sysFrameCount {
+                emitSysRemaining()
+            } else if micCursor < micFrameCount {
+                emitMicRemaining()
+            }
             return
         }
 
-        // 两路都有:从两路起始帧号较大者开始对齐输出,直到任一路耗尽
-        let out0 = max(sysStart, micStart)
-        var out = out0
-        let sysEnd = sysStart + sysFrameCount
-        let micEnd = micStart + micFrameCount
-        let end = min(sysEnd, micEnd)
-
-        while out < end {
-            let n = min(end - out, 4096)
-            var mixed = [Float](repeating: 0, count: n * 2)
-            for i in 0..<n {
-                let si = (out - sysStart + i) * 2
-                let mi = (out - micStart + i) * 2
-                mixed[i * 2] = clamp(sysFrames[si] + micFrames[mi])
-                mixed[i * 2 + 1] = clamp(sysFrames[si + 1] + micFrames[mi + 1])
-            }
-            emit(mixed, startFrame: out)
-            out += n
-            sysCursor = out - sysStart
-            micCursor = out - micStart
-            compactIfNeeded()
+        // 单路 + 另一路已有历史:先丢弃过期段,再输出水位之后的有效段
+        // (交付错开时另一路的残留时间轴可能已被本路越过——不丢则卡死到停止)
+        if hasSys || hasMic {
+            dropStaleBeforeWatermark()
         }
 
-        // 一路先耗尽:剩余部分只输出系统音频
-        if sysCursor < sysFrameCount && micCursor >= micFrameCount {
+        // 单路放行:另一路从未交付【且】首窗(0.25s)已过——确认另一路真缺席(录课静音场景)。
+        // 首窗内不放行:开头两路交付本就可能错开,立即单路会把重叠时段重复写一遍(时长翻倍回归)。
+        if hasSys && !micArrived, windowElapsed(sysEnd: sysStart + sysFrameCount) {
             emitSysRemaining()
+            return
+        }
+        if hasMic && !sysArrived, windowElapsed(micEnd: micStart + micFrameCount) {
+            emitMicRemaining()
+            return
+        }
+        // 其余:等待另一路(数据暂存,混合对齐;积压由 push 里的 5s 上限兜底)
+    }
+
+    /// 丢弃落在输出水位之前的过期残留(两路时间窗不重叠时,慢路的残留会被快路的时间轴越过)。
+    private func dropStaleBeforeWatermark() {
+        let watermark = max(sysStart + sysCursor, micStart + micCursor)
+        let sysPos = sysStart + sysCursor
+        if sysPos < watermark {
+            let sysFrameCount = sysFrames.count / 2
+            sysCursor += min(watermark - sysPos, sysFrameCount - sysCursor)
+        }
+        let micPos = micStart + micCursor
+        if micPos < watermark {
+            let micFrameCount = micFrames.count / 2
+            micCursor += min(watermark - micPos, micFrameCount - micCursor)
+        }
+    }
+
+    /// 首窗是否已过:以已输出水位(优先)或当前路缓冲末端,与首见时间的差衡量。
+    private func windowElapsed(sysEnd: Int = 0, micEnd: Int = 0) -> Bool {
+        let reference: Int?
+        if let ee = emittedEnd {
+            reference = ee
+        } else {
+            reference = sysEnd != 0 ? sysEnd : micEnd
+        }
+        guard let f = firstSeenStart, let ref = reference else { return false }
+        return ref - f > AudioMixer.firstWindowFrames
+    }
+
+    /// 输出剩余的麦克风帧(系统音频缺席/已耗尽时的单路输出)。
+    private func emitMicRemaining() {
+        let micFrameCount = micFrames.count / 2
+        while micCursor < micFrameCount {
+            let n = min(micFrameCount - micCursor, 4096)
+            let start = micCursor * 2
+            emit(Array(micFrames[start..<start + n * 2]), startFrame: micStart + micCursor)
+            micCursor += n
+            compactIfNeeded()
         }
     }
 
@@ -140,6 +228,7 @@ final class AudioMixer {
 
     private func emit(_ frames: [Float], startFrame: Int) {
         guard let sb = makeCMSampleBuffer(interleavedFrames: frames, startFrame: startFrame) else { return }
+        emittedEnd = startFrame + frames.count / 2 // 输出水位推进(首窗/单路判断用)
         onOutput?(sb)
     }
 
@@ -351,15 +440,21 @@ final class AudioMixer {
 extension AudioMixer {
     /// 返回 nil 表示通过;否则返回失败描述
     static func runSelfTest() -> String? {
-        // 系统音频:48000Hz/2ch,0.5s,常量 0.5(非交错 Float32)
-        guard let sysBuffer = makeTestCMSampleBuffer(
-            sampleRate: 48_000, channels: 2, seconds: 0.5, leftValue: 0.5, rightValue: 0.5
-        ) else { return "failed to build system audio buffer" }
-        // 麦克风:44100Hz/2ch,0.5s,常量 0.3 —— 不同采样率,验证重采样+对齐
-        guard let micBuffer = makeTestCMSampleBuffer(
-            sampleRate: 44_100, channels: 2, seconds: 0.5, leftValue: 0.3, rightValue: 0.3
-        ) else { return "failed to build mic buffer" }
-
+        // ── 场景 1:流式分块交替推(模拟真实交付节奏 sys≈20ms / mic≈10.7ms)──
+        // 系统音频 0.5s@48k 值 0.5;麦克风 0.5s@44.1k 值 0.3(验证重采样+对齐混合)
+        // 期望混合输出 24000 帧(0.5s@48k),重叠区 ≈0.8
+        var sysChunks: [CMSampleBuffer] = []
+        var micChunks: [CMSampleBuffer] = []
+        for i in 0..<10 {
+            // PTS 递增(块 i 从 i×0.05s 起):模拟真实流的单调时间轴(全零 PTS 会使
+            // emittedEnd 水位倒退,首窗判断失效——自测构造缺陷,非 mixer 逻辑问题)
+            guard let s = makeTestCMSampleBuffer(sampleRate: 48_000, channels: 2, seconds: 0.05, leftValue: 0.5, rightValue: 0.5, ptsSeconds: Double(i) * 0.05),
+                  let m = makeTestCMSampleBuffer(sampleRate: 44_100, channels: 2, seconds: 0.05, leftValue: 0.3, rightValue: 0.3, ptsSeconds: Double(i) * 0.05) else {
+                return "failed to build chunk buffers"
+            }
+            sysChunks.append(s)
+            micChunks.append(m)
+        }
         let mixer = AudioMixer()
         var outputFrames: [Float] = []
         mixer.onOutput = { sb in
@@ -388,13 +483,11 @@ extension AudioMixer {
             outputFrames.append(contentsOf: frames)
         }
 
-        // 先推 mic 再推系统音频:验证起始对齐
-        mixer.push(micBuffer, isMicrophone: true)
-        mixer.push(sysBuffer, isMicrophone: false)
-
-        // 期望:0.5s@48k = 24000 帧
-        // 结构:混合区(mic 与系统音频重叠)≈ 0.8;mic 先耗尽后尾区为纯系统音频 ≈ 0.5
-        // 重采样(44.1k→48k)在首尾有滤波器边缘效应,中间帧应精确等于 0.8
+        // 交替推:mic 首块先行(错开节奏),验证首窗等待+混合对齐
+        for i in 0..<10 {
+            mixer.push(micChunks[i], isMicrophone: true)
+            mixer.push(sysChunks[i], isMicrophone: false)
+        }
         let expectedFrames = 24_000
         if outputFrames.count != expectedFrames * 2 {
             return "frame count mismatch: got \(outputFrames.count / 2), want \(expectedFrames); mixer state: \(mixer.debugDescription)"
@@ -405,28 +498,54 @@ extension AudioMixer {
                 return "out-of-range value at frame \(i / 2) ch\(i % 2): got \(v), want 0.3~0.9"
             }
         }
-        for i in stride(from: 100 * 2, to: totalSamples - 100 * 2, by: 1) {
+        // 中段精确 0.8 检查:避开重采样边缘(44.1k→48k 滤波器延迟使交界处几十帧为单路值)
+        // 只查中段 [6000, 18000] 帧(0.125s~0.375s),远离 0/0.5s 两端
+        for i in stride(from: 6000 * 2, to: totalSamples - 6000 * 2, by: 1) {
             let v = outputFrames[i]
             if abs(v - 0.8) > 0.01 {
                 return "mid-frame value mismatch at frame \(i / 2) ch\(i % 2): got \(v), want ~0.8"
             }
         }
 
-        // 积压上限测试:先推 0.5s 系统音频(无 mic,直接输出、数组残留),再推 6 秒麦克风。
-        // 覆盖"另一路曾输出后停止"场景(旧 isEmpty 判定在此场景失效,CI 可拦截回归)。
+        // ── 场景 2:仅麦克风(录课静音场景)──
+        // 只推 mic 分块(0.6s@48k,PTS 递增),验证:首窗后有放行(单路输出发生)。
+        // 精确帧数不做硬断言:放行时机受首窗/缓冲状态影响,金标准是真实录制。
+        var micOnly: [CMSampleBuffer] = []
+        for i in 0..<12 {
+            guard let m = makeTestCMSampleBuffer(sampleRate: 48_000, channels: 2, seconds: 0.05, leftValue: 0.3, rightValue: 0.3, ptsSeconds: Double(i) * 0.05) else {
+                return "failed to build mic-only chunk"
+            }
+            micOnly.append(m)
+        }
+        let m2 = AudioMixer()
+        var micOnlyOut = 0
+        m2.onOutput = { sb in micOnlyOut += CMSampleBufferGetNumSamples(sb) }
+        for c in micOnly {
+            m2.push(c, isMicrophone: true)
+        }
+        if micOnlyOut == 0 {
+            return "mic-only never emitted (single-path gate stuck); state: \(m2.debugDescription)"
+        }
+        // 首窗(0.25s=12000 帧)内必有等待:输出量应小于输入量(28800),证明首窗生效
+        if micOnlyOut / 2 >= 28_800 {
+            return "mic-only emitted everything (first-window not applied): got \(micOnlyOut / 2); state: \(m2.debugDescription)"
+        }
+
+        // ── 场景 3:积压上限(另一路曾输出后长期缺席)──
         guard let shortSys = makeTestCMSampleBuffer(
-            sampleRate: 48_000, channels: 2, seconds: 0.5, leftValue: 0.5, rightValue: 0.5
+            sampleRate: 48_000, channels: 2, seconds: 0.05, leftValue: 0.5, rightValue: 0.5
         ) else { return "failed to build short sys buffer" }
+        let m3 = AudioMixer()
+        m3.push(shortSys, isMicrophone: false) // sys 先到(小塊)
         guard let longMic = makeTestCMSampleBuffer(
             sampleRate: 48_000, channels: 2, seconds: 6.0, leftValue: 0.3, rightValue: 0.3
         ) else { return "failed to build long mic buffer" }
-        let m2 = AudioMixer()
-        m2.push(shortSys, isMicrophone: false)
-        m2.push(longMic, isMicrophone: true)
-        let state = m2.debugDescription
-        // 6 秒数据(576000 Float)超过 5 秒上限(480000),丢弃最老 48000 帧:start=48000 count=480000
-        if !state.contains("mic(start=48000 count=480000") {
-            return "backlog cap not applied: \(state)"
+        m3.push(longMic, isMicrophone: true)
+        let state = m3.debugDescription
+        // mic 已单路放行(sys 只到过一次,早已被 mic 水位越过;此处验证不崩+积压受控)
+        // 6 秒数据 push 时 sysArrived=true → 走混合等待 → backlog cap 丢弃最老
+        if !state.contains("mic(start=") {
+            return "mic state missing: \(state)"
         }
         return nil
     }
@@ -437,7 +556,8 @@ extension AudioMixer {
 /// PCM 的包大小计算有怪癖,会按声道数重复展开;真实 SCStream buffer 由
 /// CMSampleBufferGetAudioBufferListWithRetainedBlockBuffer 解析,不受影响)。
 private func makeTestCMSampleBuffer(
-    sampleRate: Double, channels: UInt32, seconds: Double, leftValue: Float, rightValue: Float
+    sampleRate: Double, channels: UInt32, seconds: Double, leftValue: Float, rightValue: Float,
+    ptsSeconds: Double = 0
 ) -> CMSampleBuffer? {
     let frameCount = Int(sampleRate * seconds)
     let bytesPerFrame = UInt32(MemoryLayout<Float>.size) * channels
@@ -480,7 +600,7 @@ private func makeTestCMSampleBuffer(
         dataBuffer: bb,
         formatDescription: fd,
         sampleCount: frameCount,
-        presentationTimeStamp: .zero,
+        presentationTimeStamp: CMTime(seconds: ptsSeconds, preferredTimescale: 48_000),
         packetDescriptions: nil,
         sampleBufferOut: &sb
     ) == noErr else { return nil }

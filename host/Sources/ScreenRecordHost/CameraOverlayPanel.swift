@@ -24,8 +24,8 @@ final class CameraOverlayPanel: NSPanel {
     /// 尺寸上下限(逻辑点)。fileprivate:同文件 OverlayContentView 的 resize 命中需访问。
     fileprivate static let minSize: CGFloat = 80
     fileprivate static let maxSizeRatio: CGFloat = 0.4 // 屏宽的 40%
-    /// 默认尺寸:屏宽 18%;右下角边距 4%。
-    private static let defaultSizeRatio: CGFloat = 0.18
+    /// 默认尺寸:屏宽 12%(录课时人脸占比更合适;仍可用滚轮/手柄随时调整)。
+    private static let defaultSizeRatio: CGFloat = 0.12
     private static let defaultMarginRatio: CGFloat = 0.04
     /// 右下角 resize 命中区边长(逻辑点)。fileprivate:同文件的 OverlayContentView 也需访问。
     fileprivate static let handleHitSize: CGFloat = 28

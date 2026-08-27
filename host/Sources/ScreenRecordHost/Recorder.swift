@@ -93,6 +93,66 @@ final class Recorder: NSObject {
     // ScreenCaptureKit 的 excludingWindows:[] 会自然捕获浮窗,所见即所得,无需合成。
     private(set) var cameraEnabled = false
 
+    /// 音频诊断状态(audioDiag["sysFirstSeen"]/["micFirstSeen"]),录制开始时清空。
+    /// (类主体声明:extension 不能有存储属性)
+    private var audioDiag: [String: Date] = [:]
+
+    // 音频待写缓冲:混音输出先进这里,audioWriteQueue 消费写入(忙时等待而非丢帧)。
+    // pendingAudio/audioDroppedCount 由 stateLock 保护;上限 ~5 秒,超限丢最老保实时。
+    private var pendingAudio: [CMSampleBuffer] = []
+    private var audioDroppedCount = 0
+    private static let pendingAudioLimit = 60 // mixer 每块最多 4096 帧(85ms),60 块 ≈ 5s
+    private let audioWriteQueue = DispatchQueue(label: "com.screenrecord.recorder.audiowrite")
+
+    /// 混音输出入队(有界;超限丢最老并计数——持续超限说明磁盘/编码器严重过载)。
+    private func enqueueAudio(_ sb: CMSampleBuffer) {
+        let shouldPump: Bool = withState { () -> Bool in
+            pendingAudio.append(sb)
+            if pendingAudio.count > Recorder.pendingAudioLimit {
+                pendingAudio.removeFirst()
+                audioDroppedCount += 1
+            }
+            return pendingAudio.count == 1 // 从空到非空时触发 pump(防重复排队)
+        }
+        if shouldPump {
+            audioWriteQueue.async { [weak self] in self?.pumpAudio() }
+        }
+    }
+
+    /// 在 audioWriteQueue 上执行:input ready 时持续消费缓冲。
+    private func pumpAudio() {
+        let (writer, audioInput) = withState { (self.writer, self.audioInput) }
+        guard let writer, writer.status == .writing, let audioInput else { return }
+        while audioInput.isReadyForMoreMediaData {
+            guard let sb = withState({ () -> CMSampleBuffer? in
+                pendingAudio.isEmpty ? nil : pendingAudio.removeFirst()
+            }) else { break }
+            audioInput.append(sb)
+        }
+        // 缓冲仍有余量:说明 input 暂时满,等它消化。安排后续 pump(不忙等:延迟 20ms)。
+        let remaining = withState { pendingAudio.count }
+        if remaining > 0 {
+            audioWriteQueue.asyncAfter(deadline: .now() + 0.02) { [weak self] in
+                self?.pumpAudio()
+            }
+        }
+    }
+
+    /// 冲刷音频待写缓冲(在 processingQueue 上调用,先于 finishWriting)。
+    /// 轮询等待 audioWriteQueue 把 pending 写完(有界 50×20ms=1s,防卡死)。
+    /// 完成后输出音频诊断摘要(各路首帧 / 丢弃数 / 残留 / mixer 状态)。
+    private func flushPendingAudio() {
+        for _ in 0..<50 {
+            let remaining = withState { pendingAudio.count }
+            if remaining == 0 { break }
+            Thread.sleep(forTimeInterval: 0.02)
+        }
+        let (dropped, leftover) = withState { (audioDroppedCount, pendingAudio.count) }
+        let sysSeen = withState { audioDiag["sysFirstSeen"] }
+        let micSeen = withState { audioDiag["micFirstSeen"] }
+        HostLog.write("recorder: audio summary sys=\(sysSeen != nil ? "received" : "NEVER") mic=\(micSeen != nil ? "received" : "NEVER") dropped=\(dropped) leftover=\(leftover) mixer=[\(mixer.debugDescription)]")
+    }
+
     private override init() { super.init() }
 
     // MARK: - 开始
@@ -265,19 +325,23 @@ final class Recorder: NSObject {
             self.audioInput = audioIn
             self.cameraEnabled = camera
             self.sessionStartTime = nil
+            self.audioDiag = [:] // 音频诊断重置(每次录制独立统计)
             self.currentFileURL = url
             self.isRecording = true
             self.recordingSince = Date()
         }
 
-        // 混音输出 → 写音轨
+        // 混音输出 → 待写缓冲 → 专用队列消费写音轨。
+        // ⚠️ 不能在 onOutput 里直接 append:视频 4K60 编码忙时 isReadyForMoreMediaData
+        // 经常为 false,直接 append 会静默丢音频帧 → 音轨时长压缩(唇形不同步)+
+        // PTS 跳跃爆音(呲呲呲)+ 断续嘶哑(DEBUG_LOG D-009)。
+        // 改为:帧先入 pendingAudio(有界,超限丢最老保实时),audioWriteQueue 反复
+        // pump 消费——input ready 才写,忙时帧在缓冲里等,不丢。
         mixer.onOutput = { [weak self] sampleBuffer in
             guard let self else { return }
-            let (writer, audioInput) = self.withState { (self.writer, self.audioInput) }
-            guard let writer, writer.status == .writing,
-                  let audioInput, audioInput.isReadyForMoreMediaData else { return }
-            audioInput.append(sampleBuffer)
+            self.enqueueAudio(sampleBuffer)
         }
+        audioWriteQueue.async { [weak self] in self?.pumpAudio() }
 
         notifyStatus("recording-started", ["file": url.lastPathComponent, "camera": cameraEnabled])
     }
@@ -312,6 +376,9 @@ final class Recorder: NSObject {
 
         processingQueue.async { [weak self] in
             guard let self else { return }
+            // 冲刷音频待写缓冲(必须先于 finishWriting,否则尾部音频丢失)。
+            // 此刻录制已停、视频帧不再来,processingQueue 空闲,轮询等待无副作用。
+            self.flushPendingAudio()
             writer.finishWriting { [weak self] in
                 guard let self else { return }
                 // 竞态保护:如果停止后用户已开始新录制(currentFileURL 已变),旧回调不得清理新状态
@@ -476,12 +543,38 @@ extension Recorder: SCStreamOutput {
             guard let videoInput, videoInput.isReadyForMoreMediaData else { return }
             videoInput.append(sampleBuffer)
         case .audio:
+            logFirstAudioFrame(".audio")
             mixer.push(sampleBuffer, isMicrophone: false)
         case .microphone:
+            logFirstAudioFrame(".microphone")
             mixer.push(sampleBuffer, isMicrophone: true)
         @unknown default:
             break
         }
+    }
+
+    /// 音频诊断:记录每一路的首帧到达时间。
+    /// 动机:音频链路失败此前是静默的(MP4 无音轨但日志无错,DEBUG_LOG D-009),
+    /// 首帧日志能立即区分「SCStream 没交付音频」与「mixer 丢弃」两类故障。
+    private func logFirstAudioFrame(_ kind: String) {
+        let isFirst = withState { () -> Bool in
+            let key = kind == ".audio" ? "sysFirstSeen" : "micFirstSeen"
+            if audioDiag[key] == nil {
+                audioDiag[key] = Date()
+                return true
+            }
+            return false
+        }
+        if isFirst {
+            HostLog.write("recorder: first audio frame received (\(kind))")
+        }
+    }
+
+    /// 录制停止时输出音频诊断摘要(mixer 状态 + 各路首帧时间)。
+    private func logAudioSummary() {
+        let sysSeen = withState { audioDiag["sysFirstSeen"] }
+        let micSeen = withState { audioDiag["micFirstSeen"] }
+        HostLog.write("recorder: audio summary sys=\(sysSeen != nil ? "received" : "NEVER") mic=\(micSeen != nil ? "received" : "NEVER") mixer=[\(mixer.debugDescription)]")
     }
 }
 

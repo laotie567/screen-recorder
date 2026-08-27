@@ -24,8 +24,16 @@
 ### 画质类(「录制不清晰」「分辨率低」「模糊」)
 - **D-008** [根因] 录制分辨率只有物理像素 1/4 → `CGDisplayPixelsWide` 返回逻辑点,改用 `CGDisplayMode.pixelWidth`
 
+### 音频类(「没声音」「杂音」「音画不同步」)
+- **D-009** [三部曲] 无音轨(系统静音时麦克风全丢)→ 杂音拉长(交付节奏错开重复写)→ 音画不同步(mixer 水位算法)
+
+### 文件完整性类(「视频打不开」「格式不对」)
+- **D-010** [根因] 孤儿录制被强杀 → MP4 缺 moov atom → 单实例接管 + SIGTERM 优雅退出
+
 ## 目录(时间倒序)
 
+- [D-010 长录制文件打不开(moov atom 缺失/孤儿录制)](#d-010)
+- [D-009 音频三部曲:无音轨 → 杂音拉长 → 音画不同步](#d-009)
 - [D-008 录制分辨率只有物理像素 1/4,清晰度严重不足](#d-008)
 - [D-005 录完一条不能连录,必须刷新插件](#d-005)
 - [D-006 圆形摄像头浮窗切到其他窗口后消失](#d-006)
@@ -34,6 +42,84 @@
 - [D-002 摄像头录制报 `startRunning threw exception`](#d-002)
 - [D-003 install.sh 固定签名静默失败(从未真正成功过)](#d-003)
 - [D-004 摄像头 `startRunning` 异步竞态(中间态,被 D-002 根因取代)](#d-004)
+
+---
+
+<a id="d-010"></a>
+## D-010 长录制文件打不开(moov atom 缺失/孤儿录制)(2026-08-08)
+
+### 现象
+- 长时间录制(20+ 分钟,2.5GB)后,QuickTime 提示「格式不对」打不开。
+- `ffprobe` 报 `moov atom not found` —— MP4 的索引只在 `AVAssetWriter.finishWriting()` 完成时写入,该文件从未正常收尾。
+
+### 关键排查命令
+```bash
+# 1. MP4 完整性(moov 存在才可播)
+ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1 <文件>
+# 2. 停止记录是否存在(无 audio summary/recording-stopped = 录制从未被正常停止)
+grep -E "audio summary|recording-stopped|start-record" ~/Library/Logs/ScreenRecordHost.log | tail
+# 3. 是否双实例(孤儿录制 + 新实例并存)
+ps aux | grep "[S]creenRecordHost"
+```
+
+### 根因(孤儿录制)
+- 录制中 Chrome 侧 service worker 被杀 → native messaging 断连(stdin EOF)→ 宿主按设计「录制中不退出」继续录,**但扩展已失联(孤儿录制)**,popup 的停止命令永远到不了它。
+- 用户以为没在录,又点「开始录制」→ 拉起**第二个实例**(新进程的 Recorder 是全新的,start 成功)。
+- 孤儿进程最终被外部强杀(如 `pkill -9`/重启)→ `finishWriting` 没跑 → 2.5GB 文件无 moov → 打不开。
+
+### 修复(`host/Sources/ScreenRecordHost/main.swift`)
+1. **单实例锁**(锁文件存 pid):新实例启动时发现旧实例存活 → 发 SIGTERM 让其优雅收尾(安全停止 + finishWriting + 保存)后接管。孤儿录制场景下,用户点「开始录制」即触发旧实例安全保存。
+2. **SIGTERM/SIGINT 优雅退出**:`DispatchSourceSignal` 屏蔽默认立即死亡,转主线程 `gracefulShutdown()`——录制中则 `stop()` + 主 RunLoop 轮询等 finishWriting(15s 超时)再退出。任何非 SIGKILL 的终止都能保住文件。
+
+### 验证
+双实例测试:第二个实例启动后,第一个被优雅终止(pid 消失),锁文件更新为新实例 pid。
+
+### 寻源关键词
+`视频打不开` · `moov atom not found` · `格式不对` · `finishWriting 未完成` · `孤儿录制` · `双实例` · `pkill 杀掉录制` · `单实例锁` · `SIGTERM 优雅退出`
+
+---
+
+<a id="d-009"></a>
+## D-009 音频三部曲:无音轨 → 杂音拉长 → 音画不同步(2026-08-27/28)
+
+按修复演进顺序记录,三轮修复互有因果,最终形态是「水位对齐算法」。
+
+### 第一部:完全没有声音(MP4 无音轨)
+
+**现象**:图像正常,MP4 里没有音轨(`ffprobe` 只有 video 流),日志无任何音频错误。
+
+**根因**:`AudioMixer.drain()` 把系统音频硬编码为「必须存在的主轨」——`guard !sysFrames.isEmpty else { return }`。**录课场景只说话、系统无播放 → 系统音频一路全程无帧 → 麦克风声音也全部被丢弃。**
+
+**修复**:单路放行——但见第三部的教训,放行条件必须严格(另一路从未到达 + 首窗已过)。
+
+### 第二部:声音嘶哑拉长、呲呲呲尖叫(时长翻倍)
+
+**现象**:能录上声音了,但像「卡碟」:拉长、断续、尖叫声。实测 **10 秒视频配 20 秒音频**(样本量翻倍)。
+
+**根因(两个,同源)**:
+1. 两路音频交付节奏错开(sys≈20ms/块、mic≈10.7ms/块),「单路直出」让重叠时段被写两遍。
+2. `AVAudioConverter` 每块缓冲消费完就被重置(`converter = nil`),44.1k→48k 流式转换的滤波器状态丢失 → 每块交界丢数帧(缝隙杂音)。
+
+**修复**:恢复对齐混合语义;converter 不再随缓冲重置(格式缓存机制按需重建);writer 忙时音频帧进待写缓冲(audioWriteQueue 泵消费)而非丢弃。
+
+### 第三部:声音正常但音画不同步(声音跑得快)
+
+**现象**:音质干净了,但嘴型对不上,声音比画面先结束。
+
+**根因(日志铁证:mixer 残留 cursor=0)**:混合输出起点用 `max(两路各自起点)` 而非 `max(各自已消费位置)`。两路节奏错开导致缓冲残留时:
+- 起点倒退 → 已输出时段重复写(局部拉长)
+- 时间窗不重叠的残留段永远等不到对齐 → **尾部音频丢失 → AAC 编码器压缩 PTS 空洞 → 音频比视频先结束**
+
+**修复(`AudioMixer.drain` 水位算法)**:
+- 混合续接位置 = `max(sysStart+sysCursor, micStart+micCursor)`(已消费位置,不倒退)
+- 混合后 `dropStaleBeforeWatermark()`:落在输出水位之前的残留 = 被另一路时间覆盖的过期数据,丢弃(不再卡死)
+- 水位之后的有效剩余单路输出(时间轴单调,无空洞)
+
+### 验证
+自测 `test-mixer` 升级为**流式分块交替推**(模拟真实交付节奏):混合对齐(24000 帧、重叠区 0.8)✓、mic-only 首窗放行 ✓、积压上限 ✓。真实录制:音质清晰 + 唇形同步。
+
+### 寻源关键词
+`没声音` · `无音轨` · `音画不同步` · `声音跑得快` · `卡碟` · `嘶哑` · `呲呲呲` · `音频时长翻倍` · `AAC 压缩 PTS 空洞` · `AVAudioConverter 流式状态` · `水位对齐` · `emittedEnd` · `sysArrived` · `firstWindow`
 
 ---
 
